@@ -12,6 +12,10 @@ on:
         description: "Crash frame offsets into the tweak dylib (.ips imageOffset), comma-separated, e.g. 81012 or 0x13C94"
         required: false
         type: string
+      # The pipeline is app-agnostic; this is just the executable inside
+      # Payload/<App>.app/. The default names the binary of the default app set
+      # (youtube) so a run needs no extra input for the common case - pass the
+      # set's APP_PROCESS_NAME for any other app.
       app_binary_name:
         description: "Name of the app binary inside Payload/<App>.app/"
         required: false
@@ -40,14 +44,14 @@ jobs:
           mkdir -p ipa
           FOUND=$(find artifact -type f -name '*.ipa' | head -n1)
           [ -n "$FOUND" ] || { echo "::error::No .ipa in that run's artifacts"; exit 1; }
-          cp "$FOUND" ipa/YouTubeBuilder.ipa
+          cp "$FOUND" ipa/AppBuilder.ipa
           ls -la ipa/
 
       - name: Extract IPA
         run: |
           set -euo pipefail
           mkdir -p work
-          unzip -q ipa/YouTubeBuilder.ipa -d work
+          unzip -q ipa/AppBuilder.ipa -d work
           APP_BIN=$(find work -type f -path '*Payload/*.app/*' -name '${{ inputs.app_binary_name }}' | head -n1)
           [ -n "$APP_BIN" ] || { echo "::error::App binary '${{ inputs.app_binary_name }}' not found in Payload"; exit 1; }
           echo "APP_BIN=$APP_BIN" >> $GITHUB_ENV
@@ -69,11 +73,11 @@ jobs:
           OFFSETS=$(echo "${{ inputs.offsets }}" | tr ',;' '  ')
           for DY in $DYLIBS; do
             echo "=== symbolicate $DY (offsets: $OFFSETS) ===" | tee -a "$REPORT"
-            python3 Scripts/crash_analyzer.py info "$DY" 2>&1 | tee -a "$REPORT"
-            python3 Scripts/crash_analyzer.py symbolicate "$DY" $OFFSETS 2>&1 | tee -a "$REPORT"
+            python3 Scripts/crash-analysis/crash_analyzer.py info "$DY" 2>&1 | tee -a "$REPORT"
+            python3 Scripts/crash-analysis/crash_analyzer.py symbolicate "$DY" $OFFSETS 2>&1 | tee -a "$REPORT"
           done
 
-      - name: Audit tweak selectors vs YouTube binary
+      - name: Audit tweak selectors vs the app binary
         run: |
           set -uo pipefail
           REPORT=analysis_report.txt
@@ -81,7 +85,7 @@ jobs:
           for DY in $DYLIBS; do
             echo "" | tee -a "$REPORT"
             echo "=== audit: $DY vs $APP_BIN ===" | tee -a "$REPORT"
-            python3 Scripts/crash_analyzer.py audit "$APP_BIN" "$DY" 2>&1 | tee -a "$REPORT"
+            python3 Scripts/crash-analysis/crash_analyzer.py audit "$APP_BIN" "$DY" 2>&1 | tee -a "$REPORT"
           done
 
       - name: Dump reference data (selectors/symbols) for offline digging
@@ -91,15 +95,18 @@ jobs:
           touch "$REPORT"
           mkdir -p refdata
           echo "" >> "$REPORT"
-          echo "=== YouTube selector count ===" >> "$REPORT"
-          python3 Scripts/crash_analyzer.py selectors "$APP_BIN" > refdata/youtube_selectors.txt 2>&1 || true
+          echo "=== app binary selector count ===" >> "$REPORT"
+          # The filename stays youtube_selectors.txt on purpose: the offline
+          # scripts in Scripts/crash-analysis/ (local_hook_audit.py, parse_ips.py)
+          # read this exact path out of refdata/, so renaming it would break them.
+          python3 Scripts/crash-analysis/crash_analyzer.py selectors "$APP_BIN" > refdata/youtube_selectors.txt 2>&1 || true
           wc -l refdata/youtube_selectors.txt >> "$REPORT"
           i=0
           for DY in $DYLIBS; do
             i=$((i+1))
-            python3 Scripts/crash_analyzer.py selectors "$DY" > "refdata/dylib${i}_defined_selectors.txt" 2>&1 || true
-            python3 Scripts/crash_analyzer.py syms "$DY"       > "refdata/dylib${i}_symbols.txt" 2>&1 || true
-            python3 Scripts/crash_analyzer.py funcstarts "$DY" > "refdata/dylib${i}_funcstarts.txt" 2>&1 || true
+            python3 Scripts/crash-analysis/crash_analyzer.py selectors "$DY" > "refdata/dylib${i}_defined_selectors.txt" 2>&1 || true
+            python3 Scripts/crash-analysis/crash_analyzer.py syms "$DY"       > "refdata/dylib${i}_symbols.txt" 2>&1 || true
+            python3 Scripts/crash-analysis/crash_analyzer.py funcstarts "$DY" > "refdata/dylib${i}_funcstarts.txt" 2>&1 || true
           done
 
       - name: Upload analysis report

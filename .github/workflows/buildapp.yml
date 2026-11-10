@@ -1,41 +1,51 @@
 # Original idea by @ISnackable. Thanks to him for handling the hardest parts!
 # https://github.com/ISnackable/YTCubePlus/blob/main/.github/workflows/Build.yml
+#
+# Builds a SideStore/AltStore-compatible IPA for one app set: it downloads the
+# decrypted IPA, injects the selected tweaks of that app set and packs the
+# result.
+#
+# The workflow knows no concrete app. The tweak registry, the payload versions,
+# the display name, the bundle id, the alternate icons and the Safari extensions
+# all come from apps/<app_id>/, so supporting another app means adding a
+# directory - and inspecting an IPA once, so apps/<app_id>/app.json records which
+# app it is (see inspect-ipa.yml).
 
-name: Build and Release YouTubeBuilder
+name: Build and Release AppBuilder
 
 on:
   workflow_dispatch:
     inputs:
+      app_id:
+        description: "App set to build (a directory under apps/)"
+        default: "youtube"
+        required: true
+        type: string
+      decrypted_ipa_url:
+        description: "Direct URL of the decrypted IPA"
+        default: ""
+        required: true
+        type: string
+      app_name:
+        description: "Display name of the produced app (default: apps/<app_id>/app.json)"
+        default: ""
+        required: false
+        type: string
+      bundle_id:
+        description: "Bundle ID of the produced app (default: apps/<app_id>/app.json)"
+        default: ""
+        required: false
+        type: string
+      ipa_prefix:
+        description: "Prefix of the produced IPA file name"
+        default: "App"
+        required: false
+        type: string
       sdk_version:
         # 27.x selects the xcode-27 image below; jobs that ask for macos-latest
         # never get a runner here and are cancelled by GitHub after ~15 minutes.
         description: "iOS SDK Version (27.x runs on the xcode-27 image)"
         default: "27.2"
-        required: true
-        type: string
-      ytplus_version:
-        description: "YTPlus Version"
-        default: "6.0"
-        required: true
-        type: string
-      ipa_prefix:
-        description: "Prefix of the produced IPA file name"
-        default: "YTPlus"
-        required: false
-        type: string
-      decrypted_youtube_url:
-        description: "Direct URL of the decrypted YouTube IPA"
-        default: ""
-        required: true
-        type: string
-      bundle_id:
-        description: "Modify the bundle ID"
-        default: "com.google.ios.youtube"
-        required: true
-        type: string
-      app_name:
-        description: "Modify the app name"
-        default: "YouTube"
         required: true
         type: string
       commit_id:
@@ -54,8 +64,8 @@ on:
         required: false
         type: boolean
       enabled_tweaks:
-        description: "Optional tweaks to include (space- or comma-separated ids)"
-        default: "YTPlus YTweaks YTABConfig YTClassicVideoQuality Return-YouTube-Dislikes YTVideoOverlay YouQuality YouSlider YouTubeLegacy YouGroupSettings FLEXing"
+        description: "Tweaks to include (space/comma ids); empty = the app default, 'none' = none"
+        default: ""
         required: false
         type: string
 
@@ -65,7 +75,7 @@ concurrency:
 
 jobs:
   build:
-    name: Build YouTubeBuilder
+    name: Build AppBuilder
     # The iOS 27 SDK can only be consumed by the Xcode 27 toolchain: its .tbd
     # stubs list the arm64e.x1 target (unknown to Xcode 26's linker) and its
     # headers use attributes such as stack_protector_ignore (unknown to Xcode
@@ -82,6 +92,34 @@ jobs:
           path: main
           ref: ${{ inputs.commit_id || github.ref }}
           submodules: recursive
+
+      # A build is only possible for an IPA that the Inspect IPA workflow has
+      # already accepted: apps/<app_id>/app.json records the SHA-256 of the URL,
+      # and a URL that does not hash to it is refused here. The URL itself is a
+      # secret and is never stored - only its hash.
+      - name: Verify the IPA was inspected
+        working-directory: main
+        env:
+          IPA_URL: ${{ inputs.decrypted_ipa_url }}
+        run: |
+          set -euo pipefail
+          echo "::add-mask::$IPA_URL"
+          [ -n "$IPA_URL" ] || { echo "error: decrypted_ipa_url is empty" >&2; exit 1; }
+          app="${{ inputs.app_id }}"
+          manifest="apps/$app/app.json"
+          [ -f "$manifest" ] || {
+            echo "error: $manifest does not exist - unknown app '$app'" >&2
+            exit 1
+          }
+          expected="$(python3 Tools/app-info.py --app "$app" --field source)"
+          actual="sha256:$(printf '%s' "$IPA_URL" | shasum -a 256 | awk '{print $1}')"
+          if [ -z "$expected" ] || [ "$expected" != "$actual" ]; then
+            echo "error: this IPA URL has not been inspected for '$app'." >&2
+            echo "error: apps/$app/app.json records ${expected:-no source at all}." >&2
+            echo "error: run the 'Inspect IPA' workflow for this URL first - a build is only possible for a verified IPA." >&2
+            exit 1
+          fi
+          echo "IPA verified against $manifest." >> "$GITHUB_STEP_SUMMARY"
 
       - name: Install Dependencies
         run: |
@@ -183,90 +221,150 @@ jobs:
           wget --quiet "https://github.com/inoahdev/tbd/releases/download/2.2/tbd-mac" -O /usr/local/bin/tbd
           chmod +x /usr/local/bin/tbd
 
-      - name: Hash YT ipa url
+      # Everything the later steps need about the app comes out of
+      # apps/<app_id>/app.json, so no step below names a concrete app.
+      - name: Resolve the app
+        id: app
+        working-directory: main
         run: |
-          URL_YT="$(jq -r '.inputs.decrypted_youtube_url' $GITHUB_EVENT_PATH)"
-          echo ::add-mask::$URL_YT
-          echo URL_YT=$URL_YT >> $GITHUB_ENV
+          set -euo pipefail
+          app="${{ inputs.app_id }}"
+          [ -d "apps/$app" ] || { echo "error: apps/$app does not exist" >&2; exit 1; }
+          name="${{ inputs.app_name }}"
+          [ -n "$name" ] || name="$(python3 Tools/app-info.py --app "$app" --field name --default "$app")"
+          bundle="${{ inputs.bundle_id }}"
+          [ -n "$bundle" ] || bundle="$(python3 Tools/app-info.py --app "$app" --field bundleIds.0 --default "")"
+          [ -n "$bundle" ] || { echo "error: no bundle id for '$app' - inspect an IPA or pass bundle_id" >&2; exit 1; }
+          {
+            echo "app_name=$name"
+            echo "bundle_id=$bundle"
+          } >> "$GITHUB_OUTPUT"
+          echo "app=$app, name=$name, bundle=$bundle"
 
-      - name: Prepare YouTube iPA
-        id: prepare_youtube
-        run: |
-          wget "$YOUTUBE_URL" --quiet -O main/YouTube.ipa
-          cd main
-          mv YouTube.ipa YouTube.zip
-          unzip -q YouTube.zip
-          youtube_version=$(defaults read "$(pwd)/Payload/YouTube.app/Info" CFBundleVersion)
-          echo "YT_VERSION=$youtube_version" >> $GITHUB_ENV
-          echo "youtube_version=${youtube_version}" >> $GITHUB_OUTPUT
-
+      - name: Mask the IPA URL and prepare the IPA
+        id: prepare
+        working-directory: main
         env:
-          YOUTUBE_URL: ${{ env.URL_YT }}
+          IPA_URL: ${{ inputs.decrypted_ipa_url }}
+        run: |
+          set -euo pipefail
+          echo "::add-mask::$IPA_URL"
+          curl -fsSL "$IPA_URL" -o "$RUNNER_TEMP/App.ipa"
+          unzip -q "$RUNNER_TEMP/App.ipa" -d .
+          app_path="$(ls -d Payload/*.app | head -n1)"
+          [ -n "$app_path" ] || { echo "error: the IPA has no Payload/*.app bundle" >&2; exit 1; }
+          app_bin="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$app_path/Info.plist")"
+          app_version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$app_path/Info.plist")"
+          outname="${{ inputs.ipa_prefix || 'App' }}_${app_version}.ipa"
+          echo "app bundle: $app_path, executable: $app_bin, version: $app_version"
+          {
+            echo "app_path=$app_path"
+            echo "app_bin=$app_bin"
+            echo "app_version=$app_version"
+          } >> "$GITHUB_OUTPUT"
+          {
+            echo "APP_VERSION=$app_version"
+            echo "OUTNAME=$outname"
+            echo "IPA_PREFIX=${{ inputs.ipa_prefix || 'App' }}"
+          } >> "$GITHUB_ENV"
 
-      # Fails in seconds when the tweak selection cannot fit into the YouTube
+      # Fails in seconds when the tweak selection cannot fit into the app
       # binary's load-command area. Without it insert_dylib stalls for hours
       # instead of failing. The dylib list comes from the Makefile
       # (`make print-inject-dylibs`), so there is no second registry to keep in
-      # sync: a tweak added through Tweaks/custom.mk is covered automatically.
+      # sync: a tweak added through apps/<app>/custom.mk is covered automatically.
       - name: Check injection budget
+        working-directory: main
         env:
           THEOS: ${{ github.workspace }}/theos
+          INPUT_TWEAKS: ${{ inputs.enabled_tweaks }}
         run: |
-          cd main
-          DLIBS="$(make -s --no-print-directory \
+          set -euo pipefail
+          tweaks="$(printf '%s' "$INPUT_TWEAKS" | tr -s ', ' ' ' | sed 's/^ *//;s/ *$//')"
+          if [ "$tweaks" = "none" ]; then
+            enabled_arg="ENABLED_TWEAKS="
+          elif [ -n "$tweaks" ]; then
+            enabled_arg="ENABLED_TWEAKS=$tweaks"
+          else
+            enabled_arg=""
+          fi
+          echo "ENABLED_ARG=$enabled_arg" >> "$GITHUB_ENV"
+          dlibs="$(make -s --no-print-directory \
+            APP="${{ inputs.app_id }}" \
             SDK_VERSION="${{ inputs.sdk_version }}" \
-            ENABLED_TWEAKS="$(printf '%s' '${{ inputs.enabled_tweaks }}' | tr -s ', ' ' ')" \
+            $enabled_arg \
             print-inject-dylibs)"
           echo "injected dylibs:"
-          printf '  %s\n' $DLIBS
+          printf '  %s\n' $dlibs
           python3 Tools/check-inject-budget.py \
-            --binary Payload/YouTube.app/YouTube \
-            --dylibs "$DLIBS"
+            --binary "${{ steps.prepare.outputs.app_path }}/${{ steps.prepare.outputs.app_bin }}" \
+            --dylibs "$dlibs"
 
       - name: Build Package
         id: build_package
-        run: |
-          cd main
-          make package THEOS_PACKAGE_SCHEME=rootless IPA=Payload/YouTube.app FINALPACKAGE=1 \
-            SDK_VERSION="${{ inputs.sdk_version }}" \
-            BUNDLE_ID="${{ inputs.bundle_id }}" \
-            DISPLAY_NAME="${{ inputs.app_name }}" \
-            YTPLUS_VERSION="${{ inputs.ytplus_version }}" \
-            IPA_PREFIX="${{ inputs.ipa_prefix || 'YTPlus' }}" \
-            ENABLED_TWEAKS="$(printf '%s' '${{ inputs.enabled_tweaks }}' | tr -s ', ' ' ')"
-          echo "package=$(ls -t packages | head -n1)" >> $GITHUB_OUTPUT
-
+        working-directory: main
         env:
           THEOS: ${{ github.workspace }}/theos
-
-      - name: Clone Open in YouTube (Safari Extension)
         run: |
-          git clone --quiet -n --depth=1 --filter=tree:0 https://github.com/BillyCurtis/OpenYouTubeSafariExtension.git OpenYouTubeSafariExtension
-          cd OpenYouTubeSafariExtension
-          git sparse-checkout set --no-cone OpenYouTubeSafariExtension.appex
-          git checkout --quiet
-          mv *.appex ..
+          set -euo pipefail
+          make package THEOS_PACKAGE_SCHEME=rootless \
+            IPA="${{ steps.prepare.outputs.app_path }}" FINALPACKAGE=1 \
+            APP="${{ inputs.app_id }}" \
+            SDK_VERSION="${{ inputs.sdk_version }}" \
+            BUNDLE_ID="${{ steps.app.outputs.bundle_id }}" \
+            DISPLAY_NAME="${{ steps.app.outputs.app_name }}" \
+            IPA_PREFIX="${{ inputs.ipa_prefix || 'App' }}" \
+            $ENABLED_ARG
+          echo "package=$(ls -t packages | head -n1)" >> $GITHUB_OUTPUT
+
+      # The Safari extensions an app set injects are declared in its manifest, so
+      # an app without any (Instagram) simply skips this.
+      - name: Clone Safari extensions
+        working-directory: main
+        env:
+          APP_ID: ${{ inputs.app_id }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/appex"
+          python3 - <<'PY' > "$RUNNER_TEMP/extensions.tsv"
+          import json, os
+          data = json.load(open(f"apps/{os.environ['APP_ID']}/app.json"))
+          for ext in (data.get("build") or {}).get("safariExtensions") or []:
+              print(f"{ext['repo']}\t{ext['appex']}")
+          PY
+          while IFS=$'\t' read -r repo appex; do
+            [ -n "$repo" ] || continue
+            dir="$RUNNER_TEMP/extclone/$(basename "$repo")"
+            rm -rf "$dir"
+            git clone --quiet -n --depth=1 --filter=tree:0 "https://github.com/$repo.git" "$dir"
+            ( cd "$dir" && git sparse-checkout set --no-cone "$appex" && git checkout --quiet )
+            cp -R "$dir/$appex" "$RUNNER_TEMP/appex/$appex"
+            echo "cloned $repo -> $appex"
+          done < "$RUNNER_TEMP/extensions.tsv"
+          ls -la "$RUNNER_TEMP/appex"
 
       - name: Inject Tweaks Into IPA
+        working-directory: main
         run: |
-          IPA_IN="main/packages/${{ steps.build_package.outputs.package }}"
-          OUTNAME="${{ inputs.ipa_prefix || 'YTPlus' }}_${{ env.YT_VERSION }}_v${{ inputs.ytplus_version }}.ipa"
-          # Only the freshly cloned Safari extension is injected here: the
-          # theos-jailed build already put every compiled tweak into the app, so
-          # handing it the .deb as well would just copy those files a second
-          # time. (The .deb also carries the staged app, so cyan's extractor
-          # would drag nested bundles and frameworks out of it.)
-          cyan -i "$IPA_IN" -o "$OUTNAME" -uwef OpenYouTubeSafariExtension.appex \
-            -n "${{ inputs.app_name }}" -b ${{ inputs.bundle_id }}
+          set -euo pipefail
+          ipa_in="packages/${{ steps.build_package.outputs.package }}"
+          appex_args=()
+          for d in "$RUNNER_TEMP/appex"/*.appex; do
+            [ -e "$d" ] && appex_args+=(-uwef "$d")
+          done
+          # Only the cloned Safari extensions are injected here: the theos-jailed
+          # build already put every compiled tweak into the app, so handing it the
+          # .deb as well would just copy those files a second time.
+          cyan -i "$ipa_in" -o "$OUTNAME" ${appex_args[@]+"${appex_args[@]}"} \
+            -n "${{ steps.app.outputs.app_name }}" -b "${{ steps.app.outputs.bundle_id }}"
 
       - name: Strip Unresignable Extensions From Final IPA
         id: strip_ipa
+        working-directory: main
         run: |
           set -euo pipefail
-
-          OUTNAME="${{ inputs.ipa_prefix || 'YTPlus' }}_${{ env.YT_VERSION }}_v${{ inputs.ytplus_version }}.ipa"
           if [ ! -f "$OUTNAME" ]; then
-            OUTNAME="$(basename "$(find . -maxdepth 3 -name '${{ inputs.ipa_prefix || 'YTPlus' }}_*.ipa' -print -quit)")"
+            OUTNAME="$(basename "$(find . -maxdepth 3 -name "${IPA_PREFIX}_*.ipa" -print -quit)")"
           fi
           echo "Final IPA: $OUTNAME"
 
@@ -289,20 +387,33 @@ jobs:
             printf '%s\n' "$SC_INFO_MATCHES"
             zip -q -d "$OUTNAME" "Payload/*/SC_Info/*" "Payload/*/SC_Info" || true
           fi
-          mkdir -p main/packages
-          cp -f "$OUTNAME" "main/packages/$OUTNAME"
-          find main/packages -maxdepth 1 -name "*.ipa" ! -name "$OUTNAME" -delete || true
-          echo "Final SideStore-compatible IPA: main/packages/$OUTNAME"
+          mkdir -p packages
+          cp -f "$OUTNAME" "packages/$OUTNAME"
+          find packages -maxdepth 1 -name "*.ipa" ! -name "$OUTNAME" -delete || true
+          echo "Final SideStore-compatible IPA: packages/$OUTNAME"
           echo "final_ipa=$OUTNAME" >> "$GITHUB_OUTPUT"
 
+      # Alternate icons only exist for app sets that ship them (build.alternateIcons
+      # in apps/<app>/app.json, images in apps/<app>/icons). Apps without them skip
+      # straight to the upload.
       - name: Register Alternate App Icons
+        working-directory: main
+        env:
+          APP_ID: ${{ inputs.app_id }}
         run: |
           set -euo pipefail
-          IPA="main/packages/${{ steps.strip_ipa.outputs.final_ipa }}"
+          app="$APP_ID"
+          want="$(python3 Tools/app-info.py --app "$app" --field build.alternateIcons --default false)"
+          if [ "$want" != "true" ] || [ ! -d "apps/$app/icons" ]; then
+            echo "No alternate icons for '$app' - skipping." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          ipa="packages/${{ steps.strip_ipa.outputs.final_ipa }}"
+          app_path="${{ steps.prepare.outputs.app_path }}"
           rm -rf iconwork && mkdir -p iconwork/icons && cd iconwork
-          unzip -q "../$IPA" "Payload/YouTube.app/Info.plist"
-          PLIST="Payload/YouTube.app/Info.plist"
-          RAW_ICON_SRC="../main/Localizations/AppIcons"
+          unzip -q "../$ipa" "$app_path/Info.plist"
+          PLIST="$app_path/Info.plist"
+          RAW_ICON_SRC="../apps/$app/icons"
           ICON_SRC="icons"
           for f in "$RAW_ICON_SRC"/*.png; do
             name="$(basename "$f")"
@@ -329,7 +440,7 @@ jobs:
           done
           for f in "$ICON_SRC"/*.png; do
             NAME="$(basename "$f" .png)"
-            cp -f "$f" "Payload/YouTube.app/$NAME.png"
+            cp -f "$f" "$app_path/$NAME.png"
             for ROOT in CFBundleIcons "CFBundleIcons~ipad"; do
               $PB -c "Add :$ROOT:CFBundleAlternateIcons:$NAME dict" "$PLIST" 2>/dev/null || true
               $PB -c "Add :$ROOT:CFBundleAlternateIcons:$NAME:CFBundleIconFiles array" "$PLIST" 2>/dev/null || true
@@ -338,18 +449,18 @@ jobs:
             echo "Registered alternate icon: $NAME"
           done
           $PB -c "Print :CFBundleIcons:CFBundleAlternateIcons" "$PLIST" | head -20
-          zip -q "../$IPA" "$PLIST" Payload/YouTube.app/*.png
+          zip -q "../$ipa" "$PLIST" "$app_path"/*.png
           cd .. && rm -rf iconwork
-          echo "Alternate icons registered into $(basename "$IPA")"
+          echo "Alternate icons registered into $(basename "$ipa")"
 
       - name: Upload Artifact
         if: ${{ inputs.upload_artifact }}
         uses: actions/upload-artifact@v7
         env:
-          YTPLUS_VERSION: ${{ inputs.ytplus_version }}
-          YOUTUBE_VERSION: ${{ steps.prepare_youtube.outputs.youtube_version }}
+          APP_ID: ${{ inputs.app_id }}
+          APP_VERSION: ${{ steps.prepare.outputs.app_version }}
         with:
-          name: ${{ inputs.ipa_prefix || 'YTPlus' }}_${{ env.YOUTUBE_VERSION }}_${{ env.YTPLUS_VERSION }}
+          name: ${{ inputs.ipa_prefix || 'App' }}_${{ env.APP_ID }}_${{ env.APP_VERSION }}
           path: ${{ github.workspace }}/main/packages/${{ steps.strip_ipa.outputs.final_ipa }}
           if-no-files-found: error
 
@@ -359,10 +470,10 @@ jobs:
         uses: softprops/action-gh-release@v3
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          YTPLUS_VERSION: ${{ inputs.ytplus_version }}
-          YOUTUBE_VERSION: ${{ steps.prepare_youtube.outputs.youtube_version }}
+          APP_ID: ${{ inputs.app_id }}
+          APP_VERSION: ${{ steps.prepare.outputs.app_version }}
         with:
-          tag_name: v${{ env.YOUTUBE_VERSION }}-${{ env.YTPLUS_VERSION }}-(${{ github.run_number }})
-          name: v${{ env.YOUTUBE_VERSION }}-${{ env.YTPLUS_VERSION }}-(${{ github.run_number }})
+          tag_name: v${{ env.APP_ID }}-${{ env.APP_VERSION }}-(${{ github.run_number }})
+          name: v${{ env.APP_ID }}-${{ env.APP_VERSION }}-(${{ github.run_number }})
           files: main/packages/*.ipa
           draft: true

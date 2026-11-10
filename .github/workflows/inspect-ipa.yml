@@ -1,0 +1,176 @@
+# Inspects a decrypted .ipa and records what app it actually is.
+#
+# The pipeline is app-agnostic, so before anything can be built it has to know
+# which app set in apps/ an IPA belongs to. Only the bundle identifier inside the
+# archive can answer that, which is why the app dispatches this workflow right
+# after an IPA URL is added or changed:
+#
+#   1. download the IPA into the runner's temp directory - never into the checkout
+#   2. read Payload/*.app/Info.plist and the app icon
+#   3. merge the result into apps/<id>/app.json and apps/<id>/icon.png
+#   4. commit that - and nothing else
+#
+# The IPA is dropped again: it exists only to be read here, and the workflow
+# fails rather than commit anything that looks like an IPA. The recorded sha256
+# of the source URL is what the build workflow compares against, so a build is
+# only possible for an IPA that went through this step.
+
+name: Inspect IPA
+
+on:
+  workflow_dispatch:
+    inputs:
+      ipa_url:
+        description: "Direct URL of the decrypted IPA"
+        required: true
+        type: string
+      app_id:
+        description: "Force an app id (default: matched by bundle id, else derived)"
+        default: ""
+        required: false
+        type: string
+      commit:
+        description: "Record the result in apps/<id>/"
+        default: true
+        required: false
+        type: boolean
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  inspect:
+    name: Inspect IPA
+    # Same image as the other workflows, so the repository needs only one
+    # configured runner.
+    runs-on: xcode-27
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          path: repo
+          ref: ${{ github.ref }}
+          fetch-depth: 0
+          # The metadata is written by hand here; no tweak submodule is needed.
+          submodules: false
+
+      - name: Download the IPA
+        env:
+          IPA_URL: ${{ inputs.ipa_url }}
+        run: |
+          set -euo pipefail
+          echo "::add-mask::$IPA_URL"
+          # $RUNNER_TEMP is outside the workspace on purpose: the IPA must never
+          # be inside the checkout, let alone staged for a commit.
+          if [[ "$RUNNER_TEMP" == "$GITHUB_WORKSPACE"* ]]; then
+            echo "error: the runner temp directory is inside the checkout - refusing" >&2
+            exit 1
+          fi
+          curl -fsSL "$IPA_URL" -o "$RUNNER_TEMP/input.ipa"
+          ls -l "$RUNNER_TEMP/input.ipa"
+
+      - name: Inspect
+        env:
+          IPA_URL: ${{ inputs.ipa_url }}
+          INPUT_APP_ID: ${{ inputs.app_id }}
+        run: |
+          set -euo pipefail
+          cd repo
+          python3 Tools/inspect-ipa.py \
+            --ipa "$RUNNER_TEMP/input.ipa" \
+            --repo . \
+            --app-id "$INPUT_APP_ID" \
+            --source-url "$IPA_URL" \
+            --write --print > "$RUNNER_TEMP/inspect.json"
+          cat "$RUNNER_TEMP/inspect.json"
+          {
+            echo "### Detected app"
+            echo
+            echo '```json'
+            cat "$RUNNER_TEMP/inspect.json"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Read the outputs
+        id: app
+        run: |
+          set -euo pipefail
+          json="$RUNNER_TEMP/inspect.json"
+          get() { python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))[sys.argv[2]])' "$json" "$1"; }
+          {
+            echo "app_id=$(get appId)"
+            echo "bundle_id=$(get bundleId)"
+            echo "app_name=$(get name)"
+            echo "version=$(get version)"
+          } >> "$GITHUB_OUTPUT"
+
+      # Icons in a sideloaded IPA are usually Apple's CgBI-optimized PNGs, which
+      # ImageIO reads but browsers and other tools do not. Re-encoding through
+      # sips makes the committed file a plain PNG.
+      - name: Normalize the icon
+        working-directory: repo
+        env:
+          APP_ID: ${{ steps.app.outputs.app_id }}
+        run: |
+          set -euo pipefail
+          icon="apps/${APP_ID}/icon.png"
+          if [ ! -f "$icon" ]; then
+            echo "No icon extracted for ${APP_ID}." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          cp "$icon" "$RUNNER_TEMP/icon.raw.png"
+          sips -s format png "$RUNNER_TEMP/icon.raw.png" --out "$icon" >/dev/null
+          file "$icon"
+          echo "icon $(sips -g pixelWidth -g pixelHeight "$icon" | tail -2 | tr -d ' \n')" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Record the result
+        if: ${{ inputs.commit }}
+        working-directory: repo
+        env:
+          APP_ID: ${{ steps.app.outputs.app_id }}
+        run: |
+          set -euo pipefail
+          # Only the metadata may be staged. A stray IPA or Payload would mean the
+          # download leaked into the checkout, which must never happen.
+          git add apps
+          if git diff --cached --name-only | grep -E '(^|/)Payload/|\.ipa$'; then
+            echo "error: an IPA or its Payload would be committed - refusing" >&2
+            git reset -q
+            exit 1
+          fi
+          if git diff --cached --quiet; then
+            echo "No metadata change - the app was already recorded like this." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "chore(apps): inspect ${APP_ID}"
+          # The branch can move while the download and the inspection run.
+          git fetch origin "${{ github.ref_name }}"
+          git rebase "origin/${{ github.ref_name }}"
+          git push origin "HEAD:${{ github.ref_name }}"
+          git --no-pager show --stat --oneline HEAD >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Assert the IPA was not kept
+        run: |
+          set -euo pipefail
+          cd repo
+          status="$(git status --porcelain)"
+          if [ -n "$status" ]; then
+            echo "error: the working tree is dirty - the IPA leaked into the checkout" >&2
+            printf '%s\n' "$status" >&2
+            exit 1
+          fi
+          if find . -name '*.ipa' -not -path './.git/*' | grep -q .; then
+            echo "error: an .ipa is present in the checkout" >&2
+            exit 1
+          fi
+          if [ -d Payload ]; then
+            echo "error: an unpacked Payload/ is present in the checkout" >&2
+            exit 1
+          fi
+          echo "checkout is clean - no IPA was kept." >> "$GITHUB_STEP_SUMMARY"

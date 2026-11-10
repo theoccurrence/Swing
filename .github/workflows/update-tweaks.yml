@@ -1,26 +1,32 @@
 # Bumps the tweaks that lag behind their upstream repositories.
 #
-# Tools/check-tweak-updates.py compares every tweak the Makefile knows about
-# with its upstream (pinned commit + control version for submodules, release of
-# the payload .deb for Gonerino, nothing for the vendored YouGroupSettings).
+# Tools/check-tweak-updates.py compares every tweak of every app set in apps/
+# with its upstream (pinned commit + control version for submodules, the release
+# of the payload .deb for Gonerino and YTPlus, nothing for vendored tweaks).
 # Submodule tweaks move to the head of the branch .gitmodules names - or of the
-# repository's default branch - and payload versions are bumped in the Makefile.
-# The shared header/library submodules in SUPPORT_SUBMODULES travel with any
-# tweak bump, because tweaks commonly need their newer headers to compile.
-# Nothing is committed unless the bumped tweaks still compile.
+# repository's default branch - and payload versions are bumped in that app's
+# payloads.mk. The shared header/library submodules an app lists in
+# APP_SUPPORT_SUBMODULES travel with any tweak bump, because tweaks commonly
+# need their newer headers to compile. Nothing is committed unless the bumped
+# tweaks still compile.
 
 name: Update tweaks
 
 on:
   workflow_dispatch:
     inputs:
+      app:
+        description: "Only this app set (empty = every app)"
+        default: ""
+        required: false
+        type: string
       only:
-        description: "Tweaks to update (space/comma separated; empty = every outdated tweak)"
+        description: "Tweaks to update (space/comma ids; empty = every outdated tweak)"
         default: ""
         required: false
         type: string
       include_payload:
-        description: "Also bump payload tweaks (Gonerino)"
+        description: "Also bump payload tweaks (YTPlus, Gonerino)"
         default: true
         required: false
         type: boolean
@@ -72,10 +78,16 @@ jobs:
       - name: Check tweak versions
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          INPUT_APP: ${{ inputs.app }}
         run: |
           cd repo
-          python3 Tools/check-tweak-updates.py
-          python3 Tools/check-tweak-updates.py --json > "$RUNNER_TEMP/updates.json"
+          if [ -n "$INPUT_APP" ]; then
+            python3 Tools/check-tweak-updates.py --app "$INPUT_APP"
+            python3 Tools/check-tweak-updates.py --app "$INPUT_APP" --json > "$RUNNER_TEMP/updates.json"
+          else
+            python3 Tools/check-tweak-updates.py
+            python3 Tools/check-tweak-updates.py --json > "$RUNNER_TEMP/updates.json"
+          fi
 
       - name: Plan the update
         id: plan
@@ -94,6 +106,7 @@ jobs:
           include_payload = os.environ["INPUT_INCLUDE_PAYLOAD"] == "true"
           include_support = os.environ["INPUT_INCLUDE_SUPPORT"] == "true"
 
+          summaries = {a["id"]: a for a in report.get("apps", [])}
           bumps = [t for t in report["tweaks"]
                    if t["outdated"]
                    and (not only or t["id"] in only)
@@ -102,17 +115,29 @@ jobs:
           # against to move with it, so they travel with any tweak bump.
           if include_support and bumps:
               bumps += [s for s in report.get("support", []) if s["outdated"]]
-          # Verify what we touched on top of the tweaks the project builds anyway.
-          verify_tweaks = sorted(set(report["defaults"]) | {t["id"] for t in bumps if t["kind"] != "support"})
-          (runner_temp / "plan.json").write_text(json.dumps({"bumps": bumps, "verify_tweaks": verify_tweaks}, indent=2))
 
-          lines = ["| tweak | kind | version | commit |", "| --- | --- | --- | --- |"]
+          # One compile per app that has bumps, over that app's defaults plus the
+          # tweaks that were bumped for it.
+          verify = {}
+          for tweak in bumps:
+              if tweak["kind"] == "support":
+                  continue
+              for app in tweak.get("apps", []):
+                  ids = set(summaries.get(app, {}).get("defaults", []))
+                  ids.add(tweak["id"])
+                  verify[app] = sorted(ids)
+
+          (runner_temp / "plan.json").write_text(json.dumps(
+              {"bumps": bumps, "verify": verify}, indent=2))
+
+          lines = ["| app | tweak | kind | version | commit |", "| --- | --- | --- | --- | --- |"]
           for tweak in report["tweaks"] + report.get("support", []):
               version = (f"{tweak['local_version']} -> {tweak['upstream_version']}" if tweak["outdated"]
                          else tweak["local_version"] or "-")
               commit = (f"{tweak['local_commit']} -> {tweak['upstream_commit']}" if tweak["local_commit"]
                         else tweak["note"] or "-")
-              lines.append(f"| {tweak['id']} | {tweak['kind']} | {version} | {commit} |")
+              app = ", ".join(tweak.get("apps", [])) or "-"
+              lines.append(f"| {app} | {tweak['id']} | {tweak['kind']} | {version} | {commit} |")
           summary = "\n".join(lines)
           if report["offline"]:
               summary += "\n\nnetwork unreachable - upstream versions could not be checked"
@@ -152,17 +177,18 @@ jobs:
           for tweak in plan["bumps"]:
               if tweak["kind"] != "payload":
                   continue
-              variable = f"{tweak['id'].upper()}_VERSION"
-              makefile = repo / "Makefile"
-              # newline="" keeps the file's CRLF endings, so the bump stays a one-line diff.
-              with makefile.open("r", newline="") as handle:
+              variable = tweak["version_var"]
+              # Payload versions live in the app that ships the payload.
+              manifest = repo / "apps" / tweak["apps"][0] / "payloads.mk"
+              # newline="" keeps the file's line endings, so the bump stays a one-line diff.
+              with manifest.open("r", newline="") as handle:
                   text = handle.read()
-              text, count = re.subn(rf"(?m)^({variable}\s*=\s*)\S+",
+              text, count = re.subn(rf"(?m)^({re.escape(variable)}\s*=\s*)\S+",
                                     lambda match: match.group(1) + tweak["upstream_version"],
                                     text)
               if count != 1:
-                  raise SystemExit(f"error: expected exactly one {variable} in the Makefile, found {count}")
-              with makefile.open("w", newline="") as handle:
+                  raise SystemExit(f"error: expected exactly one {variable} in {manifest}, found {count}")
+              with manifest.open("w", newline="") as handle:
                   handle.write(text)
               print(f"bumped {variable} to {tweak['upstream_version']}")
 
@@ -184,7 +210,8 @@ jobs:
 
           with open(os.environ["GITHUB_OUTPUT"], "a") as out:
               out.write("applied=true\n")
-              out.write(f"verify_tweaks={' '.join(plan['verify_tweaks'])}\n")
+          with open(runner_temp / "verify.json", "w") as handle:
+              json.dump(plan["verify"], handle)
           PY
 
       - name: Install Dependencies
@@ -228,17 +255,29 @@ jobs:
         env:
           THEOS: ${{ github.workspace }}/theos
 
-      # The gate: a bump that does not compile never reaches the branch.
+      # The gate: a bump that does not compile never reaches the branch. Every
+      # app whose tweaks were bumped is compiled with its own default set plus
+      # the bumped tweaks, so the app sets cannot hide a break in one another.
       - name: Compile the bumped tweaks
         if: ${{ inputs.verify && steps.apply.outputs.applied == 'true' }}
         env:
           THEOS: ${{ github.workspace }}/theos
         run: |
+          set -euo pipefail
           cd repo
-          echo "compiling: ${{ steps.apply.outputs.verify_tweaks }}"
-          make all THEOS_PACKAGE_SCHEME=rootless \
-            SDK_VERSION="${{ inputs.sdk_version }}" \
-            ENABLED_TWEAKS="${{ steps.apply.outputs.verify_tweaks }}"
+          python3 - "$RUNNER_TEMP/verify.json" <<'PY' > "$RUNNER_TEMP/verify.tsv"
+          import json, sys
+          for app, ids in json.load(open(sys.argv[1])).items():
+              print(f"{app}\t{' '.join(ids)}")
+          PY
+          while IFS=$'\t' read -r app ids; do
+            [ -n "$app" ] || continue
+            echo "compiling $app: $ids"
+            make all THEOS_PACKAGE_SCHEME=rootless \
+              APP="$app" \
+              SDK_VERSION="${{ inputs.sdk_version }}" \
+              ENABLED_TWEAKS="$ids"
+          done < "$RUNNER_TEMP/verify.tsv"
 
       - name: Commit and push
         if: ${{ inputs.push && steps.apply.outputs.applied == 'true' }}
@@ -246,7 +285,7 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          # -u stages exactly the gitlinks and the Makefile the step above touched.
+          # -u stages exactly the gitlinks and the payloads.mk files the step above touched.
           git add -u
           git commit -F "$RUNNER_TEMP/commit-message.txt"
           # The branch can move while the verification compiles: rebase onto the

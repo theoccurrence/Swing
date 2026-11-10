@@ -1,11 +1,11 @@
-# Adds a tweak to the repository from a GitHub link.
+# Adds a tweak to one app set from a GitHub link.
 #
 # The tweak is wired up the way the hand-maintained ones are: a git submodule
 # under Tweaks/<id> plus its registry entry and dylib appended to
-# Tweaks/custom.mk, which the Makefile includes. Nothing is pushed unless the
-# tweak compiles together with the project's default set, so a wrong link, a
-# missing header or a bad dylib name fails here instead of in a build. The web UI
-# and the iOS app both surface the run.
+# apps/<app>/custom.mk, which the Makefile includes for that app. Nothing is
+# pushed unless the tweak compiles together with the app's default set, so a
+# wrong link, a missing header or a bad dylib name fails here instead of in a
+# build. The web UI and the iOS app both surface the run.
 
 name: Add tweak
 
@@ -14,6 +14,11 @@ on:
     inputs:
       repo:
         description: "GitHub repository URL of the tweak"
+        required: true
+        type: string
+      app:
+        description: "App set the tweak belongs to (a directory under apps/)"
+        default: "youtube"
         required: true
         type: string
       id:
@@ -79,6 +84,7 @@ jobs:
         id: add
         env:
           INPUT_REPO: ${{ inputs.repo }}
+          INPUT_APP: ${{ inputs.app }}
           INPUT_ID: ${{ inputs.id }}
           INPUT_BRANCH: ${{ inputs.branch }}
           INPUT_SUBPROJECT: ${{ inputs.subproject }}
@@ -103,6 +109,10 @@ jobs:
           owner, name = match.group(1), match.group(2)
           url = f"https://github.com/{owner}/{name}.git"
 
+          app = os.environ["INPUT_APP"].strip()
+          if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", app) or not (repo_dir / "apps" / app / "registry.mk").is_file():
+              raise SystemExit(f"error: '{app}' is not an app in apps/")
+
           tweak_id = os.environ["INPUT_ID"].strip() or name
           if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", tweak_id):
               raise SystemExit(f"error: '{tweak_id}' is not a usable tweak id")
@@ -111,11 +121,11 @@ jobs:
           subproject = os.environ["INPUT_SUBPROJECT"].strip().strip("/")
 
           # Refuse duplicates early - a second submodule for the same id, or an id
-          # that is already wired up, would only fail in confusing ways later.
+          # that is already wired up for this app, would only fail confusingly later.
           current = json.loads((runner_temp / "current.json").read_text())
-          known = {t["id"] for t in current["tweaks"]} | set(current.get("registry", []))
+          known = {t["id"] for t in current["tweaks"] if app in t.get("apps", [])}
           if tweak_id in known:
-              raise SystemExit(f"error: '{tweak_id}' is already part of the tweak list")
+              raise SystemExit(f"error: '{tweak_id}' is already part of the {app} tweak list")
           existing_urls = git("config", "-f", ".gitmodules", "--get-regexp", r"^submodule\..*\.url$")
           if url in existing_urls:
               raise SystemExit(f"error: {url} is already a submodule of this repository")
@@ -145,37 +155,39 @@ jobs:
                   dylib = tweak_id
                   print(f"note: no TWEAK_NAME or LIBRARY_NAME in {sub_dir}/Makefile, assuming '{dylib}'")
 
-          custom = repo_dir / "Tweaks" / "custom.mk"
+          custom = repo_dir / "apps" / app / "custom.mk"
           with custom.open("r", newline="") as handle:
               existing = handle.read()
           newline = "\r\n" if "\r\n" in existing else "\n"
           block = [
               "",
               f"# added by add-tweak.yml: {owner}/{name}" + (f" @ {branch}" if branch else ""),
-              f"TWEAK_REGISTRY += {tweak_id}",
+              f"APP_TWEAK_REGISTRY += {tweak_id}",
               f"CUSTOM_TWEAKS += {tweak_id}",
               f"{tweak_id}_SUBPROJECT = {sub_dir}",
               f"{tweak_id}_DYLIB = {dylib}",
           ]
           with custom.open("a", newline="") as handle:
               handle.write(newline.join(block) + newline)
-          print(f"appended {tweak_id} to Tweaks/custom.mk (dylib {dylib}, subproject {sub_dir})")
+          print(f"appended {tweak_id} to apps/{app}/custom.mk (dylib {dylib}, subproject {sub_dir})")
 
-          verify_tweaks = sorted(set(current.get("defaults", [])) | {tweak_id})
+          defaults = next((a["defaults"] for a in current["apps"] if a["id"] == app), [])
+          verify_tweaks = sorted(set(defaults) | {tweak_id})
           message = [
-              f"feat(tweaks): add {tweak_id}", "",
+              f"feat({app}): add {tweak_id}", "",
               f"{owner}/{name}" + (f" @ {branch}" if branch else ""),
               f"subproject {sub_dir}, dylib {dylib}",
           ]
           (runner_temp / "commit-message.txt").write_text("\n".join(message) + "\n")
 
-          diff = git("--no-pager", "diff", "--stat", "HEAD") + git("--no-pager", "diff", "HEAD", "--", ".gitmodules", "Tweaks/custom.mk")
+          diff = git("--no-pager", "diff", "--stat", "HEAD") + git("--no-pager", "diff", "HEAD", "--", ".gitmodules", f"apps/{app}/custom.mk")
           print(diff)
           with pathlib.Path(os.environ["GITHUB_STEP_SUMMARY"]).open("a") as handle:
-              handle.write(f"\n\n### {tweak_id}\n\n```\n{diff}\n```\n")
+              handle.write(f"\n\n### {app}/{tweak_id}\n\n```\n{diff}\n```\n")
               handle.write(f"\ncompiling: {' '.join(verify_tweaks)}\n")
 
           with open(os.environ["GITHUB_OUTPUT"], "a") as out:
+              out.write(f"app={app}\n")
               out.write(f"id={tweak_id}\n")
               out.write(f"dylib={dylib}\n")
               out.write(f"verify_tweaks={' '.join(verify_tweaks)}\n")
@@ -221,7 +233,7 @@ jobs:
         env:
           THEOS: ${{ github.workspace }}/theos
 
-      # The gate: the new tweak has to compile next to the project's defaults, and
+      # The gate: the new tweak has to compile next to the app's defaults, and
       # the dylib it names has to actually come out of the build.
       - name: Compile the new tweak
         if: ${{ inputs.verify }}
@@ -231,6 +243,7 @@ jobs:
           cd repo
           echo "compiling: ${{ steps.add.outputs.verify_tweaks }}"
           make all THEOS_PACKAGE_SCHEME=rootless \
+            APP="${{ steps.add.outputs.app }}" \
             SDK_VERSION="27.2" \
             ENABLED_TWEAKS="${{ steps.add.outputs.verify_tweaks }}"
           dylib="${{ steps.add.outputs.dylib }}"
@@ -246,7 +259,7 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add "Tweaks/${{ steps.add.outputs.id }}" .gitmodules Tweaks/custom.mk
+          git add "Tweaks/${{ steps.add.outputs.id }}" .gitmodules "apps/${{ steps.add.outputs.app }}/custom.mk"
           if git diff --cached --quiet; then
             echo "error: nothing was staged" >&2
             exit 1

@@ -1,16 +1,21 @@
 # Removes a tweak that was added through the app.
 #
-# Only tweaks listed in Tweaks/custom.mk can be removed - the curated ones are
-# wired up by hand in the Makefile and must not vanish because of an app button.
-# Nothing has to compile (dropping an entry cannot break the build), so the run
-# deletes the block, the gitlink and the .gitmodules section, asserts that all
-# three are gone, and pushes. The next build proves the result.
+# Only tweaks listed in an app's custom.mk can be removed - the curated ones are
+# wired up by hand in the app's registry.mk and must not vanish because of an app
+# button. Nothing has to compile (dropping an entry cannot break the build), so
+# the run deletes the block, the gitlink and the .gitmodules section, asserts
+# that all three are gone, and pushes. The next build proves the result.
 
 name: Remove tweak
 
 on:
   workflow_dispatch:
     inputs:
+      app:
+        description: "App set the tweak belongs to (a directory under apps/)"
+        default: "youtube"
+        required: true
+        type: string
       id:
         description: "Tweak id to remove (as listed under Custom)"
         required: true
@@ -46,13 +51,17 @@ jobs:
       - name: Remove the tweak
         id: remove
         env:
+          INPUT_APP: ${{ inputs.app }}
           INPUT_ID: ${{ inputs.id }}
         run: |
           python3 - <<'PY'
           import os, pathlib, re, shutil, subprocess
 
           repo = pathlib.Path("repo")
+          app = os.environ["INPUT_APP"].strip()
           tweak_id = os.environ["INPUT_ID"].strip()
+          if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", app):
+              raise SystemExit(f"error: '{app}' is not an app id")
           if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", tweak_id):
               raise SystemExit(f"error: '{tweak_id}' is not a tweak id")
 
@@ -62,9 +71,9 @@ jobs:
                   raise SystemExit(f"error: git {' '.join(args)} failed:\n{proc.stdout.strip()}\n{proc.stderr.strip()}")
               return proc.stdout
 
-          custom = repo / "Tweaks" / "custom.mk"
+          custom = repo / "apps" / app / "custom.mk"
           if not custom.is_file():
-              raise SystemExit("error: Tweaks/custom.mk does not exist")
+              raise SystemExit(f"error: apps/{app}/custom.mk does not exist")
 
           with custom.open("r", newline="") as handle:
               text = handle.read()
@@ -74,7 +83,7 @@ jobs:
           known = re.findall(r"(?m)^CUSTOM_TWEAKS\s*\+=\s*(\S+)\s*$", text)
           if tweak_id not in known:
               raise SystemExit(
-                  f"error: '{tweak_id}' is not a custom tweak (removable: {' '.join(known) or 'none'})"
+                  f"error: '{tweak_id}' is not a custom tweak of {app} (removable: {' '.join(known) or 'none'})"
               )
 
           # Drop the block: the two registry lines, the subproject/dylib pair and
@@ -83,7 +92,7 @@ jobs:
           for line in text.split(newline):
               stripped = line.strip()
               own = (
-                  stripped in (f"TWEAK_REGISTRY += {tweak_id}", f"CUSTOM_TWEAKS += {tweak_id}")
+                  stripped in (f"APP_TWEAK_REGISTRY += {tweak_id}", f"CUSTOM_TWEAKS += {tweak_id}")
                   or re.fullmatch(rf"{re.escape(tweak_id)}_(SUBPROJECT|DYLIB)\s*[:?+]?=.*", stripped)
               )
               if own:
@@ -109,16 +118,17 @@ jobs:
           git("config", "-f", ".gitmodules", "--remove-section", f"submodule.{sub}", check=False)
           if (repo / sub).exists():
               shutil.rmtree(repo / sub, ignore_errors=True)
-          git("add", "--", "Tweaks/custom.mk", ".gitmodules")
+          git("add", "--", f"apps/{app}/custom.mk", ".gitmodules")
 
-          print(f"removed {tweak_id} from Tweaks/custom.mk and {sub}")
+          print(f"removed {tweak_id} from apps/{app}/custom.mk and {sub}")
           print(git("--no-pager", "diff", "--cached", "--stat"))
           (pathlib.Path(os.environ["RUNNER_TEMP"]) / "commit-message.txt").write_text(
-              f"feat(tweaks): remove {tweak_id}\n\n"
+              f"feat({app}): remove {tweak_id}\n\n"
               f"Dropped the custom.mk entry, the .gitmodules section and the\n"
               f"Tweaks/{tweak_id} gitlink.\n"
           )
           with open(os.environ["GITHUB_OUTPUT"], "a") as out:
+              out.write(f"app={app}\n")
               out.write(f"id={tweak_id}\n")
           PY
 
@@ -127,10 +137,11 @@ jobs:
       - name: Verify the tweak is gone
         run: |
           cd repo
+          app="${{ steps.remove.outputs.app }}"
           id="${{ steps.remove.outputs.id }}"
           fail=0
-          if grep -qxF "TWEAK_REGISTRY += ${id}" Tweaks/custom.mk; then
-            echo "error: ${id} is still in Tweaks/custom.mk" >&2; fail=1
+          if grep -qxF "APP_TWEAK_REGISTRY += ${id}" "apps/${app}/custom.mk"; then
+            echo "error: ${id} is still in apps/${app}/custom.mk" >&2; fail=1
           fi
           if git config -f .gitmodules --get "submodule.Tweaks/${id}.path" >/dev/null; then
             echo "error: .gitmodules still lists Tweaks/${id}" >&2; fail=1
@@ -139,7 +150,7 @@ jobs:
             echo "error: Tweaks/${id} still exists" >&2; fail=1
           fi
           [ "$fail" -eq 0 ] || exit 1
-          echo "${id} is gone from Tweaks/custom.mk, .gitmodules and the working tree." >> "$GITHUB_STEP_SUMMARY"
+          echo "${id} is gone from apps/${app}/custom.mk, .gitmodules and the working tree." >> "$GITHUB_STEP_SUMMARY"
 
       - name: Commit and push
         if: ${{ inputs.push }}
