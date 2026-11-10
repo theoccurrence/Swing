@@ -13,5 +13,10 @@
         "appex": "OpenYouTubeSafariExtension.appex"
       }
     ]
-  }
+  },
+  "version": "21.44.4",
+  "executable": "YouTube",
+  "inspectedAt": "2026-11-10T17:04:46Z",
+  "source": "sha256:75bb1d4854f6f4b8eec5c54a51566ff00cbc265a7025e75efe22298b9ea9b539",
+  "icon": "icon.png"
 }
