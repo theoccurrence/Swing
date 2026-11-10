@@ -1,17 +1,25 @@
 #!/usr/bin/env python3
 """Report which of the repository's tweaks lag behind their upstream repositories.
 
-The tweak set comes from the Makefile (TWEAK_REGISTRY plus PAYLOAD_TWEAKS), the
-upstream URLs and branches from .gitmodules, the installed versions from each
-tweak's control file. Three kinds of tweaks are distinguished:
+Every app under apps/ owns its tweak set: registry.mk lists its tweaks, payloads.mk
+the prebuilt .deb payloads, custom.mk the tweaks added through the app. This tool
+reads all of them, so one run covers every app - the tweak ids are unique because
+they name the submodule folder under Tweaks/.
+
+Three kinds of tweaks are distinguished:
 
   submodule  a git submodule pinned to a commit - the update is a new gitlink
-  payload    a prebuilt .deb downloaded by the Makefile (YTPlus, Gonerino)
+  payload    a prebuilt .deb downloaded by the build (YTPlus, Gonerino)
   vendored   code that lives in this repository and has no upstream
 
 Upstream versions are read from raw.githubusercontent.com and git ls-remote, so
 the check needs no API token and does not touch the GitHub API rate limit. Used
 by .github/workflows/update-tweaks.yml and by the local web UI (``--json``).
+
+Usage:
+    Tools/check-tweak-updates.py                  # table for every app
+    Tools/check-tweak-updates.py --json           # machine readable
+    Tools/check-tweak-updates.py --app youtube --only YTPlus,YTweaks
 """
 
 import argparse
@@ -26,10 +34,14 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 
-USER_AGENT = "uYouEnhanced-check-tweak-updates"
+USER_AGENT = "AppBuilder-check-tweak-updates"
 NETWORK_TIMEOUT = 8
 GIT_TIMEOUT = 25
 WORKERS = 8
+
+# The files an app provides. registry.mk defines the app, custom.mk extends it
+# with tweaks added through the app, payloads.mk adds prebuilt payloads.
+APP_FILES = ("registry.mk", "custom.mk", "payloads.mk")
 
 
 def die(message):
@@ -46,10 +58,10 @@ def run(cmd, cwd=None, timeout=GIT_TIMEOUT):
 # ---------------------------------------------------------------------------
 
 def parse_makefile(text):
-    """Return the variables the Makefile sets.
+    """Return the variables a set of app makefiles sets.
 
     The first plain assignment wins, `+=` lines extend it - that is how the tweaks
-    added through the app are layered on from Tweaks/custom.mk.
+    added through the app are layered on from custom.mk.
     """
     joined = re.sub(r"\\\r?\n[ \t]*", " ", text)
     variables = {}
@@ -63,6 +75,30 @@ def parse_makefile(text):
         elif name not in variables:
             variables[name] = value
     return variables
+
+
+def app_ids(repo):
+    return sorted(p.parent.name for p in (repo / "apps").glob("*/registry.mk"))
+
+
+def app_makefile(repo, app):
+    """The app's registry plus the files that extend it, in include order."""
+    text = ""
+    for name in APP_FILES:
+        path = repo / "apps" / app / name
+        if path.is_file():
+            text += path.read_text(errors="replace") + "\n"
+    return text
+
+
+def app_manifest(repo, app):
+    path = repo / "apps" / app / "app.json"
+    if not path.is_file():
+        return {}
+    try:
+        return json.loads(path.read_text())
+    except ValueError:
+        return {}
 
 
 def submodule_urls(repo):
@@ -164,16 +200,46 @@ def control_version_text(text):
 # Checks
 # ---------------------------------------------------------------------------
 
+def lookup(makefile, name):
+    """A Makefile variable, matched case-insensitively.
+
+    Make variable names are case-sensitive, but the payload ids are written the
+    way the tweak is spelled (``Gonerino``) while the variables the update
+    workflow bumps are found by id. Matching case-insensitively keeps both the
+    Makefile and this tool happy with one spelling of each variable.
+    """
+    if name in makefile:
+        return makefile[name]
+    lowered = name.lower()
+    for key, value in makefile.items():
+        if key.lower() == lowered:
+            return value
+    return None
+
+
+def variable_name(makefile, name):
+    """The spelling of a variable as the app's makefiles define it."""
+    if name in makefile:
+        return name
+    lowered = name.lower()
+    for key in makefile:
+        if key.lower() == lowered:
+            return key
+    return name
+
+
 def local_entry(repo, tweak_id, makefile, modules, payloads):
-    subproject = makefile.get(f"{tweak_id}_SUBPROJECT")
+    subproject = lookup(makefile, f"{tweak_id}_SUBPROJECT")
     path = next((p for p in modules if subproject and (subproject == p or subproject.startswith(p + "/"))),
                 subproject or f"Tweaks/{tweak_id}")
     entry = {
         "id": tweak_id,
         "path": path,
+        "apps": [],
         "kind": None,
         "url": None,
         "ref": None,
+        "version_var": None,
         "local_version": None,
         "upstream_version": None,
         "local_commit": None,
@@ -183,8 +249,10 @@ def local_entry(repo, tweak_id, makefile, modules, payloads):
     }
     if tweak_id in payloads:
         entry["kind"] = "payload"
-        entry["url"] = makefile.get(f"{tweak_id.upper()}_URL")
-        entry["local_version"] = makefile.get(f"{tweak_id.upper()}_VERSION")
+        entry["url"] = lookup(makefile, f"{tweak_id}_URL")
+        entry["local_version"] = lookup(makefile, f"{tweak_id}_VERSION")
+        # The exact spelling the update workflow has to bump in payloads.mk.
+        entry["version_var"] = variable_name(makefile, f"{tweak_id}_VERSION")
     elif path in modules:
         entry["kind"] = "submodule"
         entry["url"] = modules[path].get("url")
@@ -199,18 +267,19 @@ def local_entry(repo, tweak_id, makefile, modules, payloads):
     return entry
 
 
-def support_entry(path, modules):
+def support_entry(repo, path, modules):
     """A header/library submodule the tweaks build against (no control file)."""
     module = modules.get(path) or {}
     return {
         "id": path,
         "path": path,
+        "apps": [],
         "kind": "support",
         "url": module.get("url"),
         "ref": module.get("branch"),
-        "local_version": None,
+        "local_version": control_version(repo / path),
         "upstream_version": None,
-        "local_commit": None,
+        "local_commit": gitlink(repo, path),
         "upstream_commit": None,
         "outdated": None,
         "note": None,
@@ -262,60 +331,88 @@ def fill_upstream(entry, token, state):
         entry["note"] = "offline (git timed out)"
 
 
-def collect(repo, only=None, token=None):
-    # Tweaks added through the app live in Tweaks/custom.mk, which the Makefile
-    # includes - read both so the report covers them.
-    text = (repo / "Makefile").read_text(errors="replace")
-    custom_tweaks = repo / "Tweaks/custom.mk"
-    if custom_tweaks.is_file():
-        text += "\n" + custom_tweaks.read_text(errors="replace")
-    makefile = parse_makefile(text)
-    registry = (makefile.get("TWEAK_REGISTRY") or "").split()
-    payloads = set((makefile.get("PAYLOAD_TWEAKS") or "").split())
+def collect(repo, only=None, token=None, apps_filter=None):
     modules = submodule_urls(repo)
-    tweaks = [local_entry(repo, id_, makefile, modules, payloads)
-              for id_ in registry + sorted(payloads)
-              if not only or id_ in only]
-    # Header/library submodules the tweaks include from Tweaks/ - a tweak that
-    # moves upstream usually needs these to move with it.
-    support = [support_entry(p, modules)
-               for p in (makefile.get("SUPPORT_SUBMODULES") or "").split()
-               if p in modules]
-    for entry in support:
-        entry["local_commit"] = gitlink(repo, entry["path"])
-        entry["local_version"] = control_version(repo / entry["path"])
+    apps = [a for a in app_ids(repo) if not apps_filter or a in apps_filter]
+    if not apps:
+        return {
+            "checked_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "offline": False, "apps": [], "tweaks": [], "outdated": [],
+            "support": [], "outdated_support": [],
+        }
+
+    tweaks = {}
+    support = {}
+    summaries = []
+    for app in apps:
+        makefile = parse_makefile(app_makefile(repo, app))
+        manifest = app_manifest(repo, app)
+        registry = (makefile.get("APP_TWEAK_REGISTRY") or "").split()
+        payloads = set((makefile.get("APP_PAYLOAD_TWEAKS") or "").split())
+        summaries.append({
+            "id": app,
+            "name": manifest.get("name") or app,
+            "bundle_ids": manifest.get("bundleIds") or [],
+            "defaults": (makefile.get("APP_DEFAULT_TWEAKS") or "").split(),
+            "custom": (makefile.get("CUSTOM_TWEAKS") or "").split(),
+        })
+        for tweak_id in registry + sorted(payloads):
+            if only and tweak_id not in only:
+                continue
+            entry = tweaks.get(tweak_id) or local_entry(repo, tweak_id, makefile, modules, payloads)
+            entry.setdefault("apps", [])
+            if app not in entry["apps"]:
+                entry["apps"].append(app)
+            tweaks[tweak_id] = entry
+        for path in (makefile.get("APP_SUPPORT_SUBMODULES") or "").split():
+            if path not in modules:
+                continue
+            entry = support.get(path) or support_entry(repo, path, modules)
+            entry.setdefault("apps", [])
+            if app not in entry["apps"]:
+                entry["apps"].append(app)
+            support[path] = entry
+
+    tweak_list = sorted(tweaks.values(), key=lambda t: t["id"])
+    support_list = sorted(support.values(), key=lambda s: s["path"])
+
     state = {"offline": False}
-    with ThreadPoolExecutor(max_workers=min(WORKERS, max(len(tweaks) + len(support), 1))) as pool:
-        list(pool.map(lambda entry: fill_upstream(entry, token, state), tweaks + support))
+    everything = tweak_list + support_list
+    with ThreadPoolExecutor(max_workers=min(WORKERS, max(len(everything), 1))) as pool:
+        list(pool.map(lambda entry: fill_upstream(entry, token, state), everything))
+
     return {
         "checked_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "offline": state["offline"],
-        "registry": registry,
-        "defaults": (makefile.get("DEFAULT_TWEAKS") or "").split(),
-        "custom": (makefile.get("CUSTOM_TWEAKS") or "").split(),
-        "tweaks": tweaks,
-        "outdated": [t["id"] for t in tweaks if t["outdated"]],
-        "support": support,
-        "outdated_support": [s["path"] for s in support if s["outdated"]],
+        "apps": summaries,
+        "tweaks": tweak_list,
+        "outdated": [t["id"] for t in tweak_list if t["outdated"]],
+        "support": support_list,
+        "outdated_support": [s["path"] for s in support_list if s["outdated"]],
     }
 
 
 def print_report(report):
+    by_app = {}
     for tweak in report["tweaks"]:
-        if tweak["outdated"]:
-            status = "OUTDATED"
-            detail = f"{tweak['local_version']} -> {tweak['upstream_version']}"
-        elif tweak["outdated"] is False:
-            status, detail = "ok", str(tweak["local_version"] or "-")
-        else:
-            status, detail = "unknown", tweak["note"] or "-"
-        location = tweak["url"] or tweak["note"] or ""
-        if tweak["ref"]:
-            location = f"{location} @ {tweak['ref']}"
-        print(f"  {status:9} {tweak['id']:24} {detail:22} {location}")
+        by_app.setdefault(tweak["apps"][0] if tweak["apps"] else "-", []).append(tweak)
+    for app in report.get("apps", []):
+        print(f"\n{app['id']} ({app['name']})")
+        for tweak in by_app.get(app["id"], []):
+            if tweak["outdated"]:
+                status = "OUTDATED"
+                detail = f"{tweak['local_version']} -> {tweak['upstream_version']}"
+            elif tweak["outdated"] is False:
+                status, detail = "ok", str(tweak["local_version"] or "-")
+            else:
+                status, detail = "unknown", tweak["note"] or "-"
+            location = tweak["url"] or tweak["note"] or ""
+            if tweak["ref"]:
+                location = f"{location} @ {tweak['ref']}"
+            print(f"  {status:9} {tweak['id']:24} {detail:22} {location}")
     for entry in report.get("support", []):
         if entry["outdated"]:
-            print(f"  OUTDATED  {entry['id']:24} {'shared module':22} "
+            print(f"\n  OUTDATED  {entry['id']:24} {'shared module':22} "
                   f"{entry['local_commit']} -> {entry['upstream_commit']}")
     if report["offline"]:
         print("\nnetwork unreachable - upstream versions could not be checked")
@@ -332,6 +429,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--repo", default=str(Path(__file__).resolve().parents[1]),
                         help="repository root (default: the parent of this script's directory)")
+    parser.add_argument("--app", default="", help="only this app (a directory under apps/)")
     parser.add_argument("--only", default="", help="comma/space separated tweak ids to check")
     parser.add_argument("--json", action="store_true", help="print the report as JSON")
     parser.add_argument("--token", default=os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN"),
@@ -339,11 +437,12 @@ def main():
     args = parser.parse_args()
 
     repo = Path(args.repo).resolve()
-    if not (repo / "Makefile").is_file():
-        die(f"{repo} does not look like the repository root (no Makefile)")
+    if not (repo / "apps").is_dir():
+        die(f"{repo} does not look like the repository root (no apps/ directory)")
 
     only = {id_ for id_ in re.split(r"[\s,]+", args.only) if id_}
-    report = collect(repo, only=only, token=args.token)
+    apps_filter = {args.app} if args.app else None
+    report = collect(repo, only=only, token=args.token, apps_filter=apps_filter)
     if args.json:
         print(json.dumps(report, indent=2))
     else:
