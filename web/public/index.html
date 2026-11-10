@@ -3,12 +3,12 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>YouTubeBuilder build</title>
+<title>AppBuilder build</title>
 <link rel="stylesheet" href="/styles.css">
 </head>
 <body>
 <header>
-  <h1>YouTubeBuilder</h1>
+  <h1>AppBuilder</h1>
   <p class="sub">Local front-end for <code id="workflow-name">buildapp.yml</code></p>
   <ul id="prereqs" class="prereqs"></ul>
 </header>
@@ -17,6 +17,11 @@
   <form id="build-form">
     <section>
       <h2>Build settings</h2>
+      <div class="field app">
+        <label for="app-select">App set</label>
+        <select id="app-select"></select>
+        <span class="desc">Tweaks, defaults and payloads come from the selected app's apps/&lt;app&gt; registry.</span>
+      </div>
       <div id="inputs" class="grid"></div>
     </section>
 
@@ -29,9 +34,7 @@
         <button type="button" data-preset="none">None</button>
         <span id="tweak-count" class="hint"></span>
       </div>
-      <div id="tweak-default" class="tweaks"></div>
-      <h3>Optional <span class="hint">(not built by default)</span></h3>
-      <div id="tweak-optional" class="tweaks"></div>
+      <div id="tweak-groups"></div>
     </section>
 
     <section>

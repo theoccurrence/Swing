@@ -65,7 +65,7 @@ section {
 .field { display: flex; flex-direction: column; gap: 4px; }
 .field label { font-weight: 600; font-size: 13px; }
 .field .desc { color: var(--muted); font-size: 12px; }
-.field input[type="text"], .field input[type="password"] {
+.field input[type="text"], .field input[type="password"], .field input[type="url"], .field select {
   font: inherit;
   padding: 7px 9px;
   border: 1px solid var(--border);
@@ -77,6 +77,8 @@ section {
 .field.check label { font-weight: 500; }
 
 .toolbar { display: flex; align-items: center; gap: 8px; margin: 10px 0; flex-wrap: wrap; }
+
+.hint.empty { padding: 12px 0; font-style: italic; }
 
 .tweaks { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 6px; }
 .tweak {

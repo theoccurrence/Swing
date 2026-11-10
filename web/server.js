@@ -1,12 +1,12 @@
 #!/usr/bin/env node
-// Local web front-end for the YouTubeBuilder build workflow.
+// Local web front-end for the AppBuilder build workflow.
 //
-// Reads the workflow inputs from .github/workflows/buildapp.yml and the tweak
-// registry from the Makefile, so both stay the single source of truth. Serves a
-// small UI that can dispatch the GitHub Actions workflow or emit an equivalent
-// local build script. No runtime dependencies.
+// Reads the workflow inputs from .github/workflows/buildapp.yml and each app's
+// manifest and registry from apps/<app>/, so those files stay the single source
+// of truth. Serves a small UI that can dispatch the GitHub Actions workflow for
+// one app set or emit an equivalent local build script. No runtime dependencies.
 import { createServer } from 'node:http';
-import { readFile, stat } from 'node:fs/promises';
+import { readFile, readdir, stat } from 'node:fs/promises';
 import { appendFileSync } from 'node:fs';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -30,7 +30,7 @@ const WORKFLOWS = {
 };
 const CHECKER_REL = 'Tools/check-tweak-updates.py';
 const UPDATE_CACHE_MS = 6 * 60 * 60 * 1000;
-const MAKEFILE_REL = 'Makefile';
+const APPS_DIR = 'apps';
 const PREREQ_BINS = ['make', 'git', 'curl', 'unzip', 'ldid', 'dpkg', 'cyan', 'xcodebuild', 'python3'];
 const TWEAK_INPUT = 'enabled_tweaks';
 const MAX_BODY = 1 << 20;
@@ -93,12 +93,13 @@ function parseWorkflowInputs(yaml) {
   return inputs;
 }
 
-function parseMakefileTweaks(text) {
+// A makefile reader that understands the one pattern the app files use: a plain
+// assignment sets a value, `+=` lines extend it. That is how an app's
+// tweaks.json groups and the custom.mk append layer on top of registry.mk.
+function readAssignments(text) {
   const joined = text.replace(/\\\r?\n[ \t]*/g, ' ');
   const lines = joined.split(/\r?\n/);
-  // The first plain assignment wins, `+=` lines extend it - that is how the tweaks
-  // added through the app are layered on from Tweaks/custom.mk.
-  const readVar = (name) => {
+  return (name) => {
     const base = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     const plain = new RegExp(`^${base}\\s*[:?]?=\\s*(.*)$`);
     const append = new RegExp(`^${base}\\s*\\+=\\s*(.*)$`);
@@ -114,20 +115,79 @@ function parseMakefileTweaks(text) {
     }
     return value;
   };
-  const list = (v) => (v || '').split(/\s+/).filter(Boolean);
-  const registry = list(readVar('TWEAK_REGISTRY'));
-  const payload = list(readVar('PAYLOAD_TWEAKS'));
-  const defaults = new Set(list(readVar('DEFAULT_TWEAKS')));
-  const tweaks = [...registry, ...payload].map((id) => ({
-    id,
-    subproject: readVar(`${id}_SUBPROJECT`),
-    dylib: readVar(`${id}_DYLIB`),
-    // Payload tweaks ship as prebuilt .debs, so their version lives in the Makefile.
-    payload: payload.includes(id),
-    version: readVar(`${id.toUpperCase()}_VERSION`) || null,
-    default: defaults.has(id),
+}
+
+const mkList = (v) => (v || '').split(/\s+/).filter(Boolean);
+
+// Builds one entry of the config's `apps` array from apps/<id>/. The registry is
+// the source of the tweak ids and their build wiring, app.json carries the
+// manifest, payloads.mk the prebuilt .deb versions and custom.mk the tweaks that
+// were added through the app. tweaks.json only decides the picker grouping.
+async function buildApp(id) {
+  const dir = path.join(REPO_ROOT, APPS_DIR, id);
+  const read = (file) => readFile(path.join(dir, file), 'utf8').catch(() => '');
+  const [manifestText, registry, payloads, custom, tweaksText] = await Promise.all([
+    readFile(path.join(dir, 'app.json'), 'utf8').catch(() => '{}'),
+    read('registry.mk'),
+    read('payloads.mk'),
+    read('custom.mk'),
+    read('tweaks.json'),
+  ]);
+  const manifest = JSON.parse(manifestText);
+  const readVar = readAssignments(`${registry}\n${custom}\n${payloads}`);
+
+  const groups = [];
+  const groupOf = new Map();
+  try {
+    for (const group of JSON.parse(tweaksText).groups || []) {
+      if (!group || !group.name) continue;
+      groups.push(group.name);
+      for (const tweak of group.tweaks || []) groupOf.set(tweak, group.name);
+    }
+  } catch { /* tweaks.json is optional: every tweak then falls into "Other" */ }
+
+  const registryIds = mkList(readVar('APP_TWEAK_REGISTRY'));
+  const payloadIds = mkList(readVar('APP_PAYLOAD_TWEAKS'));
+  const customIds = new Set(mkList(readVar('CUSTOM_TWEAKS')));
+  const defaults = new Set(mkList(readVar('APP_DEFAULT_TWEAKS')));
+  const ids = [...registryIds, ...payloadIds.filter((pid) => !registryIds.includes(pid))];
+
+  const tweaks = await Promise.all(ids.map(async (tweakId) => {
+    const payload = payloadIds.includes(tweakId);
+    // Payload tweaks ship as prebuilt .debs, so their version lives in payloads.mk
+    // under the mixed-case <id>_VERSION; submodules keep it in their control file.
+    const control = payload ? {} : await readControl(tweakId);
+    return {
+      id: tweakId,
+      payload,
+      default: defaults.has(tweakId),
+      version: (payload ? readVar(`${tweakId}_VERSION`) : control.version) || null,
+      dylib: readVar(`${tweakId}_DYLIB`) || null,
+      subproject: readVar(`${tweakId}_SUBPROJECT`) || null,
+      group: groupOf.get(tweakId) || null,
+      custom: customIds.has(tweakId),
+      name: control.name,
+      description: control.description,
+    };
   }));
-  return { tweaks, registry, defaults: [...defaults] };
+
+  return {
+    id: manifest.id || id,
+    name: manifest.name || readVar('APP_NAME') || id,
+    bundleIds: manifest.bundleIds || [readVar('APP_BUNDLE_ID')].filter(Boolean),
+    tweaks,
+    groups,
+    defaults: [...defaults],
+  };
+}
+
+async function listApps() {
+  try {
+    const entries = await readdir(path.join(REPO_ROOT, APPS_DIR), { withFileTypes: true });
+    return entries.filter((e) => e.isDirectory()).map((e) => e.name).sort();
+  } catch {
+    return [];
+  }
 }
 
 async function readControl(id) {
@@ -190,36 +250,25 @@ async function findTheos() {
 // ---------------------------------------------------------------------------
 
 async function buildConfig() {
-  const [workflowYaml, makefileText, customTweaks, repo, theos, ...prereqs] = await Promise.all([
+  const [workflowYaml, repo, theos, ...prereqs] = await Promise.all([
     readFile(path.join(REPO_ROOT, WORKFLOW_REL), 'utf8'),
-    readFile(path.join(REPO_ROOT, MAKEFILE_REL), 'utf8'),
-    readFile(path.join(REPO_ROOT, 'Tweaks', 'custom.mk'), 'utf8').catch(() => ''),
     readRepoInfo(),
     findTheos(),
     ...PREREQ_BINS.map(which),
   ]);
   const inputs = parseWorkflowInputs(workflowYaml);
-  // Tweaks added through the app live in the include file the Makefile pulls in.
-  const { tweaks } = parseMakefileTweaks(`${makefileText}\n${customTweaks}`);
-  const enriched = await Promise.all(
-    tweaks.map(async (t) => {
-      const control = await readControl(t.id);
-      return {
-        ...t,
-        name: control.name,
-        description: control.description,
-        // Submodules keep their version in control, payload tweaks in the Makefile.
-        version: control.version || t.version,
-      };
-    }),
-  );
+  const apps = (await Promise.all((await listApps()).map(buildApp))).filter(Boolean);
+  // The workflow's default app_id leads the list, so the UI opens on the same
+  // app a dispatch without an explicit choice would build.
+  const preferred = typeof inputs.app_id?.default === 'string' ? inputs.app_id.default : '';
+  apps.sort((a, b) => (a.id === preferred ? -1 : b.id === preferred ? 1 : a.id.localeCompare(b.id)));
   return {
     workflow: WORKFLOW_NAME,
     updateWorkflow: UPDATE_WORKFLOW_NAME,
     repo,
     inputs,
     tweakInput: TWEAK_INPUT,
-    tweaks: enriched,
+    apps,
     prereqs,
     theos,
   };
@@ -243,9 +292,17 @@ function normaliseTweaks(value, valid) {
   return out;
 }
 
-function resolveInputs(config, submitted, specs = config.inputs) {
+function findApp(config, submitted, specs) {
+  const requested = String(submitted?.app_id ?? specs?.app_id?.default ?? '').trim();
+  return config.apps.find((a) => a.id === requested) || config.apps[0] || null;
+}
+
+function resolveInputs(config, submitted, specs = config.inputs, { lenient = false } = {}) {
   const values = {};
-  const validTweaks = new Set(config.tweaks.map((t) => t.id));
+  // Valid tweak ids come from the app the same submission selects: switching the
+  // app in the UI must not let another app's tweak ids through.
+  const app = findApp(config, submitted, specs);
+  const validTweaks = new Set((app ? app.tweaks : []).map((t) => t.id));
   for (const [key, spec] of Object.entries(specs)) {
     if (key === config.tweakInput) {
       values[key] = normaliseTweaks(submitted?.[key], validTweaks).join(' ');
@@ -257,7 +314,7 @@ function resolveInputs(config, submitted, specs = config.inputs) {
       values[key] = value === true || value === 'true' || value === '1' ? 'true' : 'false';
     } else {
       const str = value === undefined || value === null ? '' : String(value);
-      if (spec.required && str.trim() === '') throw new Error(`Missing required input: ${key}`);
+      if (spec.required && !lenient && str.trim() === '') throw new Error(`Missing required input: ${key}`);
       values[key] = str;
     }
   }
@@ -276,7 +333,7 @@ async function dispatchWorkflow({ token, owner, repo, ref, inputs, workflow = WO
       Accept: 'application/vnd.github+json',
       Authorization: `Bearer ${token}`,
       'X-GitHub-Api-Version': '2022-11-28',
-      'User-Agent': 'YouTubeBuilder-WebUI',
+      'User-Agent': 'AppBuilder-WebUI',
       'Content-Type': 'application/json',
     },
     body: JSON.stringify({ ref, inputs }),
@@ -290,13 +347,18 @@ async function dispatchWorkflow({ token, owner, repo, ref, inputs, workflow = WO
 // Tweak updates
 // ---------------------------------------------------------------------------
 
-let updatesCache = { at: 0, data: null };
+// The report is app-scoped, so cache one entry per selected app.
+const updatesCache = new Map();
 
-async function checkTweakUpdates({ token = '', refresh = false } = {}) {
-  if (!refresh && updatesCache.data && Date.now() - updatesCache.at < UPDATE_CACHE_MS) {
-    return { ...updatesCache.data, cached: true };
+async function checkTweakUpdates({ token = '', refresh = false, app = '' } = {}) {
+  const key = app || '';
+  const cached = updatesCache.get(key);
+  if (!refresh && cached && Date.now() - cached.at < UPDATE_CACHE_MS) {
+    return { ...cached.data, cached: true };
   }
-  const { stdout } = await execFileAsync('python3', [CHECKER_REL, '--json'], {
+  const args = [CHECKER_REL, '--json'];
+  if (app) args.push('--app', app);
+  const { stdout } = await execFileAsync('python3', args, {
     cwd: REPO_ROOT,
     maxBuffer: 32 << 20,
     timeout: 180000,
@@ -304,7 +366,7 @@ async function checkTweakUpdates({ token = '', refresh = false } = {}) {
     env: { ...process.env, GITHUB_TOKEN: token || process.env.GITHUB_TOKEN || '' },
   });
   const data = JSON.parse(stdout);
-  updatesCache = { at: Date.now(), data };
+  updatesCache.set(key, { at: Date.now(), data });
   return data;
 }
 
@@ -341,7 +403,7 @@ async function syncRepo() {
   }
   log.push(await git(['submodule', 'sync', '--recursive']));
   log.push(await git(['submodule', 'update', '--init', '--recursive']));
-  updatesCache = { at: 0, data: null };
+  updatesCache.clear();
   return log.filter(Boolean).join('\n');
 }
 
@@ -349,41 +411,44 @@ function shq(value) {
   return `"${String(value).replace(/[\\$"`]/g, (c) => `\\${c}`)}"`;
 }
 
-function buildLocalScript(cfg, values) {
+function buildLocalScript(values) {
+  // Only forward the overrides the user actually set; an empty BUNDLE_ID on the
+  // make command line would beat the Makefile's fallback to the app registry.
+  const makeArgs = [];
+  if (values.sdk_version) makeArgs.push(`  SDK_VERSION=${shq(values.sdk_version)}`);
+  if (values.bundle_id) makeArgs.push(`  BUNDLE_ID=${shq(values.bundle_id)}`);
+  if (values.app_name) makeArgs.push(`  DISPLAY_NAME=${shq(values.app_name)}`);
+  if (values.ipa_prefix) makeArgs.push(`  IPA_PREFIX=${shq(values.ipa_prefix)}`);
+  makeArgs.push('  ENABLED_TWEAKS="$ENABLED_TWEAKS"');
   return `#!/usr/bin/env bash
-# Generated by the YouTubeBuilder web UI. Mirrors .github/workflows/${WORKFLOW_NAME}.
+# Generated by the AppBuilder web UI. Mirrors .github/workflows/${WORKFLOW_NAME}.
 # Requires: Theos (THEOS), make, curl, unzip, ldid, dpkg.
 set -euo pipefail
 
 export THEOS=\${THEOS:-$HOME/theos}
-IPA_URL=${shq(values.decrypted_youtube_url)}
-SDK_VERSION=${shq(values.sdk_version)}
-YTPLUS_VERSION=${shq(values.ytplus_version)}
-IPA_PREFIX=${shq(values.ipa_prefix)}
-BUNDLE_ID=${shq(values.bundle_id)}
-APP_NAME=${shq(values.app_name)}
+APP=${shq(values.app_id)}
+IPA_URL=${shq(values.decrypted_ipa_url)}
 ENABLED_TWEAKS=${shq(values.enabled_tweaks)}
 
 command -v make >/dev/null || { echo "error: make not found" >&2; exit 1; }
 [ -f "$THEOS/makefiles/common.mk" ] || { echo "error: Theos not found at $THEOS" >&2; exit 1; }
-[ -n "$IPA_URL" ] || { echo "error: decrypted_youtube_url is empty" >&2; exit 1; }
+[ -n "$IPA_URL" ] || { echo "error: decrypted_ipa_url is empty" >&2; exit 1; }
 
 git submodule update --init --recursive
 
-rm -f YouTube.ipa
-rm -rf Payload
-curl -fsSL "$IPA_URL" -o YouTube.ipa
-unzip -q YouTube.ipa
-YT_VERSION=$(defaults read "$PWD/Payload/YouTube.app/Info" CFBundleVersion)
-echo "YouTube version: $YT_VERSION"
+# Unpack into a scratch dir: the IPA URL is only a hash in app.json, so there is
+# no local file to reuse, and the app bundle inside is whatever the IPA carries.
+IPA_TMP="$(mktemp -d)"
+trap 'rm -rf "$IPA_TMP"' EXIT
+curl -fsSL "$IPA_URL" -o "$IPA_TMP/app.ipa"
+unzip -q "$IPA_TMP/app.ipa" -d "$IPA_TMP"
+APP_BUNDLE="$(find "$IPA_TMP/Payload" -maxdepth 1 -name '*.app' -type d | head -n1)"
+[ -n "$APP_BUNDLE" ] || { echo "error: no .app bundle inside the IPA Payload/" >&2; exit 1; }
+APP_VERSION=$(defaults read "$APP_BUNDLE/Info" CFBundleVersion)
+echo "$APP version: $APP_VERSION"
 
-make package THEOS_PACKAGE_SCHEME=rootless IPA=Payload/YouTube.app FINALPACKAGE=1 \\
-  SDK_VERSION="$SDK_VERSION" \\
-  BUNDLE_ID="$BUNDLE_ID" \\
-  DISPLAY_NAME="$APP_NAME" \\
-  YTPLUS_VERSION="$YTPLUS_VERSION" \\
-  IPA_PREFIX="$IPA_PREFIX" \\
-  ENABLED_TWEAKS="$ENABLED_TWEAKS"
+make package THEOS_PACKAGE_SCHEME=rootless IPA="$APP_BUNDLE" FINALPACKAGE=1 APP="$APP" \\
+${makeArgs.join(' \\\n')}
 
 echo "Built: $(ls -t packages | head -n1)"
 `;
@@ -450,6 +515,7 @@ async function handleApi(req, res, pathname) {
     sendJson(res, 200, await checkTweakUpdates({
       token: (body.token || '').trim(),
       refresh: Boolean(body.refresh),
+      app: (body.app || '').trim(),
     }));
     return true;
   }
@@ -461,7 +527,9 @@ async function handleApi(req, res, pathname) {
     const body = await readBody(req);
     const config = await buildConfig();
     if (pathname === '/api/local-script') {
-      sendJson(res, 200, { script: buildLocalScript(config, resolveInputs(config, body.inputs)) });
+      // The script carries its own guards for missing values, so an incomplete
+      // form still yields a runnable skeleton to inspect or edit.
+      sendJson(res, 200, { script: buildLocalScript(resolveInputs(config, body.inputs, config.inputs, { lenient: true })) });
       return true;
     }
     const workflow = (body.workflow || WORKFLOW_NAME).trim();
@@ -538,7 +606,7 @@ server.requestTimeout = 60000;
 server.keepAliveTimeout = 5000;
 
 server.listen(PORT, HOST, () => {
-  console.log(`YouTubeBuilder web UI: http://${HOST}:${PORT}`);
+  console.log(`AppBuilder web UI: http://${HOST}:${PORT}`);
   console.log(`Repository: ${REPO_ROOT}`);
   log('start', `listening on ${HOST}:${PORT}`);
 });

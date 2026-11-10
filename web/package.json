@@ -1,9 +1,9 @@
 {
-  "name": "youtubebuilder-web-ui",
+  "name": "appbuilder-web-ui",
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "description": "Local web front-end for the YouTubeBuilder build workflow",
+  "description": "Local web front-end for the AppBuilder build workflow",
   "scripts": {
     "start": "node server.js"
   },
