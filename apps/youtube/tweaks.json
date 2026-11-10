@@ -1,0 +1,44 @@
+{
+  "groups": [
+    {
+      "name": "Essentials",
+      "tweaks": [
+        "YTPlus",
+        "YTweaks",
+        "YTABConfig",
+        "YTClassicVideoQuality",
+        "Return-YouTube-Dislikes",
+        "YTVideoOverlay",
+        "YouQuality",
+        "iSponsorBlock"
+      ]
+    },
+    {
+      "name": "Additional Features",
+      "tweaks": [
+        "Gonerino",
+        "DontEatMyContent",
+        "YouPiP",
+        "YouSlider",
+        "YouLoop",
+        "YouMute",
+        "YouTimeStamp",
+        "YouSpeed",
+        "YTHoldForSpeed",
+        "YTUHD",
+        "YTAmbientLight",
+        "NoYTPremium"
+      ]
+    },
+    {
+      "name": "Compatibility",
+      "tweaks": [
+        "YouGroupSettings",
+        "FLEXing",
+        "YTIcons",
+        "YouTubeLegacy",
+        "IAmYouTube"
+      ]
+    }
+  ]
+}

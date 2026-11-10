@@ -2,8 +2,7 @@
 .DS_Store
 packages/
 tmp/
-Tweaks/YTPlus/
-Tweaks/Gonerino/
+Tweaks/payloads/
 Resources/
 *.ipa
 .vscode

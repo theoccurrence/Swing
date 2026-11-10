@@ -1,0 +1,10 @@
+{
+  "groups": [
+    {
+      "name": "Essentials",
+      "tweaks": [
+        "sparkle-ig"
+      ]
+    }
+  ]
+}

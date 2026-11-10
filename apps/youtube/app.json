@@ -1,0 +1,17 @@
+{
+  "id": "youtube",
+  "name": "YouTube",
+  "bundleIds": [
+    "com.google.ios.youtube"
+  ],
+  "process": "YouTube",
+  "build": {
+    "alternateIcons": true,
+    "safariExtensions": [
+      {
+        "repo": "BillyCurtis/OpenYouTubeSafariExtension",
+        "appex": "OpenYouTubeSafariExtension.appex"
+      }
+    ]
+  }
+}

@@ -1,0 +1,8 @@
+{
+  "id": "instagram",
+  "name": "Instagram",
+  "bundleIds": [
+    "com.burbn.instagram"
+  ],
+  "process": "Instagram"
+}

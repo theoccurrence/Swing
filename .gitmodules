@@ -97,3 +97,6 @@
 [submodule "Tweaks/YTAmbientLight"]
 	path = Tweaks/YTAmbientLight
 	url = https://github.com/aricloverEXTRA/YTAmbientLight.git
+[submodule "Tweaks/sparkle-ig"]
+	path = Tweaks/sparkle-ig
+	url = https://github.com/efibalogh/sparkle-ig.git
