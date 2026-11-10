@@ -1,6 +1,6 @@
 # The Scripts
 
-Tooling for YouTubeBuilder. Pure Python 3 stdlib (plus
+Tooling for AppBuilder. Pure Python 3 stdlib (plus
 [capstone](https://pypi.org/project/capstone/) for the disassembler) — runs on
 Windows, macOS, or Linux without needing Mac/Xcode.
 

@@ -1,76 +1,112 @@
-# YouTubeBuilder
+# AppBuilder
 
-Build pipeline that injects a **selectable set of YouTube tweaks** into a decrypted
-YouTube IPA and produces a SideStore/AltStore-compatible `.ipa`.
+Build pipeline that injects a **selectable set of tweaks** into a decrypted iOS
+app IPA and produces a SideStore/AltStore-compatible `.ipa`. It is app-agnostic:
+the YouTube and Instagram sets in `apps/` are just two entries, and adding a third
+app means adding a directory.
 
 This repository ships no tweak sources of its own. It orchestrates third-party
 tweaks — compiled from git submodules or downloaded as prebuilt packages — and
-injects them into a YouTube IPA with [Theos](https://theos.dev) and
+injects them into an app IPA with [Theos](https://theos.dev) and
 [theos-jailed](https://github.com/qnblackcat/theos-jailed).
+
+## The multi-app model
+
+Every app the pipeline can build lives in `apps/<app>/` and owns everything
+specific to that app, so the app sets never bleed into each other:
+
+| Path | Role |
+|---|---|
+| `apps/<app>/app.json` | Manifest. Records what the app actually is — `id`, `name`, `bundleIds`, `version`, `executable`, `icon`, the `source` `sha256:<hex>` of the inspected IPA URL and `inspectedAt`. Written by the Inspect IPA workflow; the hand-owned `process` and `build` keys (`build.alternateIcons`, `build.safariExtensions`) say how to build it. |
+| `apps/<app>/registry.mk` | The tweak registry: `APP_NAME`, `APP_BUNDLE_ID`, `APP_PROCESS_NAME`, `APP_DEFAULT_TWEAKS`, `APP_TWEAK_REGISTRY`, one `<id>_SUBPROJECT` + `<id>_DYLIB` per tweak, `APP_SUPPORT_SUBMODULES`, `APP_ADDITIONAL_CFLAGS`, `APP_EXTRA_SUBPROJECTS`, `APP_EMBED_LIBRARIES`, `APP_EMBED_FRAMEWORKS`, `APP_EMBED_EXTENSIONS`. |
+| `apps/<app>/payloads.mk` | Optional. `APP_PAYLOAD_TWEAKS` plus a mixed-case block per prebuilt payload: `<id>_VERSION`, `<id>_URL`, `<id>_DYLIB_REL`, `<id>_BUNDLE_REL`, `<id>_BUNDLE_NAME` (e.g. `YTPlus_VERSION`, `Gonerino_URL`). |
+| `apps/<app>/custom.mk` | Optional. Appended by the Add tweak workflow: `APP_TWEAK_REGISTRY += <id>`, `CUSTOM_TWEAKS += <id>`, `<id>_SUBPROJECT`, `<id>_DYLIB`. |
+| `apps/<app>/tweaks.json` | Picker grouping: `{"groups":[{"name":"Essentials","tweaks":["..."]}, ...]}`. Tweaks listed nowhere land in an **Other** group; ids in `CUSTOM_TWEAKS` go into a **Custom** group that only appears once one exists. |
+| `apps/<app>/icons/` | Optional alternate app-icon PNGs (only for apps whose manifest sets `build.alternateIcons`). |
+
+`Makefile` takes the app set to build through `APP=<app>`, reads only these files
+for that app, and errors on an unknown app. Two sets ship today: `apps/youtube`
+(~25 tweaks plus the YTPlus and Gonerino payloads) and `apps/instagram` (one
+tweak, `sparkle-ig`).
 
 ## How a build works
 
-1. The workflow downloads the decrypted YouTube IPA given as `decrypted_youtube_url`
-   and reads its version from `Payload/YouTube.app/Info.plist`.
-2. `Tools/check-inject-budget.py` verifies that the selected tweaks fit into the
+1. The **Inspect IPA** workflow (`inspect-ipa.yml`) runs first and is what makes a
+   build possible at all: it downloads the decrypted IPA into the runner's temp
+   directory — never into the checkout — reads `Payload/*.app/Info.plist` and the
+   app icon, and merges the name, bundle id, version and icon into
+   `apps/<id>/app.json` / `apps/<id>/icon.png`. It commits only that metadata,
+   drops the IPA again, and fails rather than commit anything IPA-shaped.
+2. **Build and Release AppBuilder** (`buildapp.yml`) downloads the decrypted IPA
+   given as `decrypted_ipa_url`, but only after verifying that
+   `apps/<app_id>/app.json` records the SHA-256 of that URL. The URL itself is
+   masked and never stored — only its hash is — so a build is only possible for
+   an IPA that went through inspection for that app set.
+3. `Tools/check-inject-budget.py` verifies that the selected tweaks fit into the
    binary's load-command area. It measures the dylibs `make print-inject-dylibs`
    prints, so the check keeps no tweak registry of its own and covers tweaks added
    through the app. Without that check `insert_dylib` stalls for hours instead of
    failing.
-3. Theos builds the submodule tweaks and theos-jailed injects every selected dylib
+4. Theos builds the submodule tweaks and theos-jailed injects every selected dylib
    — plus its settings bundle, embedded libraries and frameworks — into the app.
-4. `cyan` injects the Open in YouTube Safari extension, the IPA is stripped of
-   unresignable extensions and `SC_Info`, alternate app icons are registered, and
-   the result is uploaded as artifact and/or draft release.
+5. `cyan` injects the Safari extensions the manifest declares (`build.safariExtensions`),
+   the IPA is stripped of unresignable extensions and `SC_Info`, alternate app
+   icons are registered (if `build.alternateIcons` and `apps/<app>/icons` exist),
+   and the result is uploaded as artifact and/or draft release.
+
+## Build inputs
+
+`buildapp.yml` knows no concrete app — the display name, bundle id, alternate
+icons and Safari extensions all come from `apps/<app_id>/`.
+
+| Input | Default | Meaning |
+|---|---|---|
+| `app_id` | `youtube` | App set to build (a directory under `apps/`). |
+| `decrypted_ipa_url` | – | Direct URL of the decrypted IPA; must hash to the `source` recorded in `apps/<app_id>/app.json`. |
+| `app_name` | `apps/<app_id>/app.json` | Display name of the produced app. |
+| `bundle_id` | `apps/<app_id>/app.json` | Bundle ID of the produced app. |
+| `ipa_prefix` | `App` | Prefix of the produced IPA file name. |
+| `sdk_version` | `27.2` | iOS SDK used for the Theos build (27.x needs the `xcode-27` image). |
+| `commit_id` | – | Optional commit to build at. |
+| `upload_artifact` | `false` | Upload the IPA as a workflow artifact. |
+| `create_release` | `true` | Create a draft release with the IPA. |
+| `enabled_tweaks` | app default | Tweaks to inject; empty means `APP_DEFAULT_TWEAKS`, the literal `none` means none. |
 
 ## Tweak selection
 
-`Makefile` is the single source of truth for the tweak registry. The GitHub
-workflow, the local web UI in `web/` and the YouTubeBuilder iOS app all read it
-from there, so adding a tweak means editing the Makefile only.
+`apps/<app>/registry.mk` is the single source of truth for that app's tweak
+registry. The GitHub workflow, the local web UI in `web/` and the AppBuilder iOS
+app all read it from there, so adding a tweak to an app means editing that
+registry only. The Makefile maps the app files onto its own vocabulary:
 
-| Variable | Meaning |
+| Variable (in `registry.mk` / `payloads.mk`) | Meaning |
 |---|---|
-| `TWEAK_REGISTRY` | Tweaks compiled from a submodule (`<id>_SUBPROJECT`, `<id>_DYLIB`). |
-| `PAYLOAD_TWEAKS` | Tweaks shipped as prebuilt `.deb` packages that the build downloads and unpacks. |
-| `DEFAULT_TWEAKS` | Pre-selected set; also the default of the workflow's `enabled_tweaks` input. |
-| `ENABLED_TWEAKS` | Space- or comma-separated ids to inject. Overrides `DEFAULT_TWEAKS`. |
+| `APP_TWEAK_REGISTRY` | Tweaks compiled from a submodule (`<id>_SUBPROJECT`, `<id>_DYLIB`). |
+| `APP_PAYLOAD_TWEAKS` | Tweaks shipped as prebuilt `.deb` packages that the build downloads and unpacks. |
+| `APP_DEFAULT_TWEAKS` | Pre-selected set; also the default of the workflow's `enabled_tweaks` input. |
+| `ENABLED_TWEAKS` | Space- or comma-separated ids to inject. Overrides `APP_DEFAULT_TWEAKS`. |
 
 Payload tweaks are listed first, because they carry most of the functionality:
 
 ```sh
-make package IPA=Payload/YouTube.app ENABLED_TWEAKS="YTPlus Gonerino YouSlider"
+make package APP=youtube IPA=Payload/YouTube.app ENABLED_TWEAKS="YTPlus Gonerino YouSlider"
 ```
-
-## Build inputs
-
-| Input | Default | Meaning |
-|---|---|---|
-| `sdk_version` | `26.5` | iOS SDK used for the Theos build. |
-| `ytplus_version` | `6.0` | YTPlus payload version. |
-| `ipa_prefix` | `YTPlus` | Prefix of the produced IPA file name. |
-| `decrypted_youtube_url` | – | Direct URL of the decrypted YouTube IPA. |
-| `bundle_id` | `com.google.ios.youtube` | Bundle ID of the produced app. |
-| `app_name` | `YouTube` | Display name of the produced app. |
-| `commit_id` | – | Optional commit to build at. |
-| `upload_artifact` | `false` | Upload the IPA as a workflow artifact. |
-| `create_release` | `true` | Create a draft release with the IPA. |
-| `enabled_tweaks` | `DEFAULT_TWEAKS` | Tweaks to inject. |
 
 ## Local build
 
 Requires Theos with an iPhoneOS SDK, `make`, `curl`, `unzip`, `ldid`, `dpkg` and a
-decrypted YouTube IPA unpacked into `Payload/`.
+decrypted IPA unpacked into `Payload/`.
 
 ```sh
 export THEOS=$HOME/theos
 make package THEOS_PACKAGE_SCHEME=rootless IPA=Payload/YouTube.app FINALPACKAGE=1 \
-  SDK_VERSION=26.5 YTPLUS_VERSION=6.0 ENABLED_TWEAKS="YTPlus Gonerino"
+  APP=youtube SDK_VERSION=27.2 ENABLED_TWEAKS="YTPlus Gonerino"
 ```
 
-`web/server.js` serves a small local front-end that reads the workflow inputs and
-the tweak registry from this repository, can dispatch the GitHub workflow, and can
-emit an equivalent local build script:
+`web/server.js` serves a small local front-end (plain node, no `npm install`) that
+reads the workflow inputs from `buildapp.yml` and the manifests/registries from
+`apps/<app>/`, can dispatch the GitHub workflows, and can emit an equivalent local
+build script:
 
 ```sh
 cd web && npm start   # http://localhost:8787
@@ -78,37 +114,40 @@ cd web && npm start   # http://localhost:8787
 
 ## Tweak updates
 
-`Tools/check-tweak-updates.py` compares every tweak with its upstream repository:
-the pinned commit and the `control` version for submodule tweaks, the latest
-GitHub release for payload tweaks such as Gonerino, and nothing for tweaks that
-live in this repository (`YouGroupSettings`). No API token is needed — `control`
-comes from `raw.githubusercontent.com` and the refs from `git ls-remote`.
+`Tools/check-tweak-updates.py` compares every tweak of every app set with its
+upstream repository: the pinned commit and the `control` version for submodule
+tweaks, the latest GitHub release for payload tweaks such as Gonerino, and nothing
+for tweaks that live in this repository. No API token is needed — `control` comes
+from `raw.githubusercontent.com` and the refs from `git ls-remote`.
 
 ```sh
-python3 Tools/check-tweak-updates.py           # table
-python3 Tools/check-tweak-updates.py --json    # for tooling
+python3 Tools/check-tweak-updates.py            # every app
+python3 Tools/check-tweak-updates.py --app youtube
+python3 Tools/check-tweak-updates.py --json     # for tooling
 ```
 
 `update-tweaks.yml` (dispatchable from the web UI, and from the iOS app the same
-way as the build workflow) turns that report into a commit: submodule tweaks move
-to the head of the branch `.gitmodules` names, payload versions are bumped in the
-Makefile, the bumped tweaks are compiled, and only then is the result pushed.
+way as the build workflow) turns that report into a commit, per app: submodule
+tweaks move to the head of the branch `.gitmodules` names, payload versions are
+bumped in the app's `payloads.mk`, the bumped tweaks are compiled, and only then is
+the result pushed.
 
 Tweaks that move upstream usually drag their build dependencies along, so
-`SUPPORT_SUBMODULES` in the Makefile lists the shared header sets and libraries
-(`Tweaks/YouTubeHeader`, `Tweaks/PSHeader`, `Tweaks/libundirect`,
+`APP_SUPPORT_SUBMODULES` in an app's `registry.mk` lists the shared header sets and
+libraries (`Tweaks/YouTubeHeader`, `Tweaks/PSHeader`, `Tweaks/libundirect`,
 `Tweaks/RemoteLog`) that travel with any tweak bump — YouSlider 1.4.1 only
 compiles against the newer YouTubeHeader. Alderis and protobuf stay pinned by
 hand, and `Alderis.framework` is built with patched xcodebuild flags.
 
 | Input | Default | Meaning |
 |---|---|---|
+| `app` | every app | Only this app set. |
 | `only` | – | Tweaks to update; empty means every outdated tweak. |
-| `include_payload` | `true` | Also bump payload tweaks (Gonerino). |
+| `include_payload` | `true` | Also bump payload tweaks (YTPlus, Gonerino). |
 | `include_support` | `true` | Move the shared header/library submodules too. |
 | `verify` | `true` | Compile the bumped tweaks before pushing. |
 | `push` | `true` | Push the result; off only reports what would change. |
-| `sdk_version` | `26.5` | iOS SDK used for the verification compile. |
+| `sdk_version` | `27.2` | iOS SDK used for the verification compile. |
 
 The web UI checks upstream versions when it loads, badges outdated tweaks with the
 version they could move to, and offers the matching actions: *Update outdated
@@ -118,17 +157,18 @@ the next build uses the new versions. Syncing refuses to run on a dirty checkout
 
 ## Custom tweaks
 
-Tweaks can be added from a GitHub link instead of editing the Makefile by hand.
-`add-tweak.yml` (dispatchable from the app's Tweaks page) checks out the
-repository, adds it as a submodule under `Tweaks/<id>`, appends its registry entry
-and dylib to `Tweaks/custom.mk` — the include the Makefile pulls in — and compiles
-it together with the project's default set. Only when that gate passes is the
-result pushed, so a broken link, a missing header or a wrong dylib name fails in
-the workflow instead of in a build.
+Tweaks can be added from a GitHub link instead of editing an app's registry by
+hand. `add-tweak.yml` (dispatchable from the app's Tweaks page) checks out the
+repository, adds the tweak as a submodule under `Tweaks/<id>`, appends its registry
+entry and dylib to `apps/<app>/custom.mk` — the include the Makefile pulls in for
+that app — and compiles it together with the app's default set. Only when that gate
+passes is the result pushed, so a broken link, a missing header or a wrong dylib
+name fails in the workflow instead of in a build.
 
 | Input | Default | Meaning |
 |---|---|---|
 | `repo` | – | Repository URL of the tweak (github.com). |
+| `app` | `youtube` | App set the tweak belongs to (a directory under `apps/`). |
 | `id` | repository name | Tweak id and submodule folder. |
 | `branch` | repository default | Branch pinned in `.gitmodules`. |
 | `subproject` | repository root | Directory carrying the Makefile, e.g. `libflex`. |
@@ -136,7 +176,7 @@ the workflow instead of in a build.
 | `verify` | `true` | Compile the tweak before pushing. |
 | `push` | `true` | Commit and push the new tweak. |
 
-`CUSTOM_TWEAKS` in the Makefile records what was added this way;
+`CUSTOM_TWEAKS` in each app's `custom.mk` records what was added this way;
 `Tools/check-tweak-updates.py`, the web UI and the app all read it, so custom
 tweaks are version-checked and updated like the curated ones, and the app's tweak
 picker shows them in a **Custom** section that only appears once the first one
@@ -145,23 +185,26 @@ exists.
 ### Removing a custom tweak
 
 `remove-tweak.yml` — dispatchable from the app by swiping a row in **Custom** —
-does the reverse: it deletes the `Tweaks/custom.mk` block, the `.gitmodules`
-section and the `Tweaks/<id>` gitlink, asserts that all three are gone, and then
-pushes. Only ids listed in `CUSTOM_TWEAKS` can be removed; the curated tweaks are
-wired up by hand and should not disappear because of a button. Nothing has to
-compile, since deleting an entry cannot break the build — the next build is the
-gate.
+does the reverse for one app: it deletes the `apps/<app>/custom.mk` block, the
+`.gitmodules` section and the `Tweaks/<id>` gitlink, asserts that all three are
+gone, and then pushes. Only ids listed in that app's `CUSTOM_TWEAKS` can be
+removed; the curated tweaks are wired up by hand and should not disappear because
+of a button. Nothing has to compile, since deleting an entry cannot break the
+build — the next build is the gate.
 
 | Input | Default | Meaning |
 |---|---|---|
-| `id` | – | Tweak id to remove, as listed in `CUSTOM_TWEAKS`. |
+| `app` | `youtube` | App set the tweak belongs to. |
+| `id` | – | Tweak id to remove, as listed in that app's `CUSTOM_TWEAKS`. |
 | `push` | `true` | Commit and push the removal. |
 
 ## The iOS app
 
-`YouTubeBuilder` (a separate Xcode project) is a thin client for the workflow: it
-dispatches it with the inputs above, shows status and logs, and downloads the
-resulting IPA into its library, from where it can be handed to SideStore.
+`AppBuilder` (a separate Xcode project) is a thin client for the workflows: it
+dispatches the build with the inputs above, shows status and logs, and downloads
+the resulting IPA into its library, from where it can be handed to SideStore. The
+add, remove and update workflows are app-scoped, so the client passes the app set
+along with the tweak selection.
 
 ## Credits
 

@@ -1,10 +1,16 @@
-Package: com.saassandro.youtubebuilder
-Name: YouTubeBuilder
+Package: com.theoccurrence.appbuilder
+Name: AppBuilder
 Architecture: iphoneos-arm
-Description: Injects a selectable set of YouTube tweaks into a decrypted YouTube IPA
+Description: Injects a selectable set of tweaks into a decrypted iOS app and repacks it as an IPA
 Maintainer: arichornlover
 Author: qnblackcat
 Section: Tweaks
 Depends: mobilesubstrate (>= 0.9.5000)
-Conflicts: com.level3tjg.ytminiplayerenabler, com.level3tjg.ytnohovercards, com.ps.noytpremium, com.ps.ytnopaidpromo, com.lilacvibes.ytstockvolumehud, net.sarahh12099.youtubereborn, com.twickd.sarahh12099.youtube-reborn, h.ryan.youtubereborn, weeb.lillie.enhancerforyoutubepremium
-Recommends: com.ps.youmute, com.ps.youpip, com.ps.youquality, com.ps.ytabconfig, com.ps.ytvideooverlay, libflex, weeb.lillie.youtubedislikesreturn
+
+# The Conflicts/Recommends lists below were specific to the YouTube app set
+# (tweaks that duplicate or complement the YouTube functionality) and no longer
+# belong to a generic, multi-app package, which installs whatever the selected
+# app set injects. They are kept here for reference; an app that needs package-
+# level conflicts should declare them in its own set.
+# Conflicts: com.level3tjg.ytminiplayerenabler, com.level3tjg.ytnohovercards, com.ps.noytpremium, com.ps.ytnopaidpromo, com.lilacvibes.ytstockvolumehud, net.sarahh12099.youtubereborn, com.twickd.sarahh12099.youtube-reborn, h.ryan.youtubereborn, weeb.lillie.enhancerforyoutubepremium
+# Recommends: com.ps.youmute, com.ps.youpip, com.ps.youquality, com.ps.ytabconfig, com.ps.ytvideooverlay, libflex, weeb.lillie.youtubedislikesreturn
