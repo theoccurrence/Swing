@@ -179,6 +179,19 @@ print-enabled-tweaks:
 print-inject-dylibs:
 	@printf '%s\n' $(sort $(notdir $($(TWEAK_NAME)_INJECT_DYLIBS)))
 
+# Some tweaks predate the SDK this pipeline builds with, and one of them cannot
+# compile against it at all (sparkle-ig redeclares a class UIKit only ships from
+# iOS 26 on). Tools/patch-sparkle-ig.py adjusts that - and only that - before the
+# subprojects are compiled, and reverts it afterwards so a local build does not
+# leave the submodule dirty. The script is idempotent and fails loudly when
+# upstream moves the code it rewrites.
+ifneq ($(filter sparkle-ig,$(ENABLED_TWEAKS)),)
+before-all::
+	@python3 Tools/patch-sparkle-ig.py
+after-all::
+	@python3 Tools/patch-sparkle-ig.py --revert
+endif
+
 # Downloads and unpacks every enabled payload through one generic helper, so the
 # Makefile knows no payload by name. Tools/prepare-payload.sh fails loudly if the
 # .deb does not contain the dylib and bundle the app's payloads.mk names.
