@@ -13,7 +13,7 @@ archive, so this runs right after an IPA URL is added or changed:
   * merge the result into apps/<id>/app.json.
 
 The IPA itself is never written into the repository - it is only read here and
-dropped again. tools/inspect-ipa.py is the whole check, so
+dropped again. Tools/inspect-ipa.py is the whole check, so
 .github/workflows/inspect-ipa.yml stays a thin wrapper around it.
 
 `source` records a SHA-256 of the URL the IPA was fetched from. The URL itself
@@ -189,7 +189,21 @@ def main():
         app_dir.mkdir(parents=True, exist_ok=True)
         if icon:
             (app_dir / "icon.png").write_bytes(icon)
-        (app_dir / "app.json").write_text(json.dumps(entry, indent=2) + "\n")
+        manifest = app_dir / "app.json"
+        # Re-inspecting the same IPA must not turn into a commit: keeping the
+        # previous timestamp when nothing else changed makes the write a no-op,
+        # so the workflow takes its "no metadata change" path instead of pushing.
+        previous = None
+        if manifest.is_file():
+            try:
+                previous = json.loads(manifest.read_text())
+            except ValueError:
+                previous = None
+        if previous and previous.get("inspectedAt"):
+            without_stamp = lambda data: {k: v for k, v in data.items() if k != "inspectedAt"}
+            if without_stamp(previous) == without_stamp(entry):
+                entry["inspectedAt"] = previous["inspectedAt"]
+        manifest.write_text(json.dumps(entry, indent=2) + "\n")
         result["appDir"] = str(app_dir.relative_to(repo))
 
     if args.print_result:
