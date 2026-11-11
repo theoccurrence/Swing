@@ -95,44 +95,50 @@ YouTube Safari extension, both the `.appex` bundles the Makefile embeds
 YouTube; deselecting it leaves the extensions out, and another app can never pick
 them up because the switch is not one of its tweaks.
 
-### Tweaks that predate the build SDK
+### Tweaks that need their own SDK
 
 The pipeline builds every tweak against one SDK (`sdk_version`, 27.2 by default)
-because the app binary needs it, while a tweak may be written against an older
-one. `sparkle-ig` is the case in point: its own Makefile pins `iPhoneOS16.2`, and
-its sources therefore declare the two iOS 26 UIKit classes it hooks themselves.
-With the iOS 27 SDK, where UIKit declares both, that becomes:
+because the app binary needs it: the Makefile exports `TARGET`, `SYSROOT` and
+`SDK_PATH` so that no subproject falls back to an SDK that is not installed.
+
+A tweak written against an older SDK is the exception. `sparkle-ig` pins
+`iPhoneOS16.2` in its own Makefile, declares the iOS 26 UIKit classes it hooks
+itself and links `Preferences.framework`; against the newer SDK that is
 
 ```
 src/Features/Interface/LiquidGlass.xm:170:1: error: duplicate interface definition for class 'UIScrollEdgeEffect'
 src/Features/Interface/OLEDDarkMode.x:29:1: error: duplicate interface definition for class 'UIGlassEffect'
-src/Features/Interface/OLEDDarkMode.x:30:38: error: property has a previous declaration
+ld: framework 'Preferences' not found
 ```
 
-`Tools/patch-sparkle-ig.py` makes exactly those two compile, differently because
-the classes differ:
+so the app names the SDK the tweak wants:
 
-| Class | What the patch does | Why |
-|---|---|---|
-| `UIScrollEdgeEffect` | becomes a category | the tweak *adds* methods (UIKit has no `+hide`), so the declarations are still needed |
-| `UIGlassEffect` | loses its declaration | UIKit declares the class and the same `tintColor` (only `nullable`, so redeclaring would clash again) |
+```make
+# apps/instagram/registry.mk
+sparkle-ig_OWN_SDK = 16.2
+```
 
-A scan of the SDK's 8679 headers against every class the tweak declares says these
-two are the only clashes - everything else it declares is private, Instagram's own
-or FLEX. Nothing else in the tweak is touched, and the hooks stay runtime-guarded
-(`objc_getClass(...)`), so a system without the classes never sees them.
+Such a tweak stays out of the aggregate - the aggregate is exactly what forces one
+SDK on every subproject - and `Tools/build-own-sdk-tweak.sh` builds it on its own
+with those variables dropped, so the `TARGET` its own Makefile pins decides. Its
+dylib is then injected the way a payload's is. **The tweak's sources are not
+touched**, which is the whole point: `Preferences.framework` and the older UIKit
+headers are exactly what its author builds against.
 
-The Makefile runs the patch from `before-all` (which precedes the subproject
-builds) and reverts it from `after-all`, so a local build does not leave the
-submodule dirty. It is idempotent and fails loudly when upstream rewords a
-declaration, so the patch cannot silently rot. A build that dies before the
-revert leaves the submodule patched; `git submodule update --force Tweaks/sparkle-ig`
-puts it back.
+`Tools/install-own-sdk.sh <app>` installs the SDKs an app asks for. The build
+workflow runs it before `make` and folds the versions into the SDK cache key, so an
+app whose tweaks all share the pipeline's SDK - YouTube - keeps its existing cache
+key and builds exactly as before. Locally:
 
-The same clashes also make the compiler warn that the classes are newer than the
-iOS 15 deployment target - a warning Theos would turn into an error - so the
-instagram set demotes that one warning (`APP_ADDITIONAL_CFLAGS` in
-`apps/instagram/registry.mk`) rather than annotating third-party code.
+```sh
+THEOS=$HOME/theos Tools/install-own-sdk.sh instagram
+```
+
+A tweak's resource bundle still comes from `Bundles/<name>.bundle`, which points at
+the submodule's own resources. What is *not* run is the tweak's packaging step, so
+a bundle that step would post-process stays as its sources ship it - sparkle-ig
+augments its bundle with FFmpeg that way, and building without that is the
+configuration upstream's own `SPARKLE_NO_FFMPEG=1` selects.
 
 Payload tweaks are listed first, because they carry most of the functionality:
 

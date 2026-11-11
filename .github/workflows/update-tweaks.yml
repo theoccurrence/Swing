@@ -231,6 +231,23 @@ jobs:
           path: theos
           submodules: recursive
 
+      # The SDKs the app's own-SDK tweaks need are cached together with the
+      # pipeline's, so the cache key has to name them (and a look at the app's
+      # registry has to happen before the cache step).
+      - name: Determine the SDKs the app's tweaks ask for
+        working-directory: repo
+        run: |
+          list="$(Tools/install-own-sdk.sh --list '${{ inputs.app_id }}' | tr '\n' '-')"
+          [ -z "$list" ] || list="-$list"
+          printf 'suffix=%s\n' "$list" >> "$GITHUB_OUTPUT"
+        id: extra_sdks
+
+      - name: Install the SDKs the app's tweaks ask for
+        working-directory: repo
+        env:
+          THEOS: ${{ github.workspace }}/theos
+        run: Tools/install-own-sdk.sh "${{ inputs.app_id }}"
+
       - name: SDK Caching
         if: ${{ inputs.verify }}
         id: SDK
@@ -238,7 +255,7 @@ jobs:
         with:
           path: theos/sdks/
           # Same source and key as the build workflow, so the SDK download is shared.
-          key: iOS-xybp888-${{ inputs.sdk_version }}-SDK
+          key: iOS-xybp888-${{ inputs.sdk_version }}${{ steps.extra_sdks.outputs.suffix }}-SDK
 
       - name: Download iOS SDK
         if: ${{ inputs.verify && steps.SDK.outputs.cache-hit != 'true' }}

@@ -444,6 +444,10 @@ command -v make >/dev/null || { echo "error: make not found" >&2; exit 1; }
 
 git submodule update --init --recursive
 
+# A tweak can ask for its own SDK (<id>_OWN_SDK in the app's registry); the helper
+# installs it and is a no-op for an app whose tweaks all share one.
+Tools/install-own-sdk.sh "$APP"
+
 # Unpack into a scratch dir: the IPA URL is only a hash in app.json, so there is
 # no local file to reuse, and the app bundle inside is whatever the IPA carries.
 IPA_TMP="$(mktemp -d)"

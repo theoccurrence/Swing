@@ -87,7 +87,22 @@ ifneq ($(UNKNOWN_TWEAKS),)
 $(error Unknown tweak(s) in ENABLED_TWEAKS: $(UNKNOWN_TWEAKS). Valid ids: $(TWEAK_REGISTRY) $(PAYLOAD_TWEAKS) $(SWITCH_TWEAKS))
 endif
 
-ENABLED_TWEAK_SUBPROJECTS = $(foreach t,$(COMPILED_TWEAKS),$($(t)_SUBPROJECT))
+# A tweak can ask to be built with the SDK its own Makefile pins instead of the one
+# this pipeline forces on every other subproject. The app names the version:
+#
+#   sparkle-ig_OWN_SDK = 16.2
+#
+# Such a tweak is not part of the aggregate - the aggregate is exactly what
+# forces one SYSROOT on every subproject - so it is built on its own below and its
+# dylib is injected the way a payload's is. That keeps a tweak that has not caught
+# up with the newest SDK buildable without touching its sources.
+OWN_SDK_TWEAKS = $(foreach t,$(ENABLED_TWEAKS),$(if $($(t)_OWN_SDK),$(t)))
+
+# Only the subproject list leaves them out: their dylib still ends up in the same
+# obj dir as every other subproject's (subprojects inherit THEOS_OBJ_DIR), so
+# ENABLED_TWEAK_DYLIBS below needs no special case.
+AGGREGATE_TWEAKS = $(filter-out $(PAYLOAD_TWEAKS) $(SWITCH_TWEAKS) $(OWN_SDK_TWEAKS),$(ENABLED_TWEAKS))
+ENABLED_TWEAK_SUBPROJECTS = $(foreach t,$(AGGREGATE_TWEAKS),$($(t)_SUBPROJECT))
 ENABLED_TWEAK_DYLIBS = $(foreach t,$(COMPILED_TWEAKS),$(THEOS_OBJ_DIR)/$($(t)_DYLIB).dylib)
 
 export ADDITIONAL_CFLAGS = $(APP_ADDITIONAL_CFLAGS)
@@ -179,17 +194,12 @@ print-enabled-tweaks:
 print-inject-dylibs:
 	@printf '%s\n' $(sort $(notdir $($(TWEAK_NAME)_INJECT_DYLIBS)))
 
-# Some tweaks predate the SDK this pipeline builds with, and one of them cannot
-# compile against it at all (sparkle-ig redeclares a class UIKit only ships from
-# iOS 26 on). Tools/patch-sparkle-ig.py adjusts that - and only that - before the
-# subprojects are compiled, and reverts it afterwards so a local build does not
-# leave the submodule dirty. The script is idempotent and fails loudly when
-# upstream moves the code it rewrites.
-ifneq ($(filter sparkle-ig,$(ENABLED_TWEAKS)),)
+# Own-SDK tweaks are built here, before the aggregate, so that their dylib exists
+# by the time theos-jailed injects the list. The script drops the SDK variables the
+# root exports, which is what makes the subproject's own SDK win.
+ifneq ($(OWN_SDK_TWEAKS),)
 before-all::
-	@python3 Tools/patch-sparkle-ig.py
-after-all::
-	@python3 Tools/patch-sparkle-ig.py --revert
+	@$(foreach t,$(OWN_SDK_TWEAKS),Tools/build-own-sdk-tweak.sh "$($(t)_SUBPROJECT)" "$(THEOS_OBJ_DIR)/$($(t)_DYLIB).dylib" "$($(t)_OWN_SDK)" || exit 1;)
 endif
 
 # Downloads and unpacks every enabled payload through one generic helper, so the

@@ -13,9 +13,10 @@ APP_TWEAK_REGISTRY = sparkle-ig
 sparkle-ig_SUBPROJECT = Tweaks/sparkle-ig
 sparkle-ig_DYLIB = Sparkle
 
-# sparkle-ig hooks UIScrollEdgeEffect, a class UIKit only ships from iOS 26 on,
-# while the package targets iOS 15. The hooks are installed only behind a runtime
-# objc_getClass check, but the compiler still warns that the type is newer than
-# the deployment target - and Theos builds with -Werror. Demote that one warning
-# instead of failing, the way the YouTube set demotes the libc++ one.
-APP_ADDITIONAL_CFLAGS = -Wno-error=unguarded-availability-new
+# sparkle-ig is written for the SDK its own Makefile pins (iPhoneOS16.2): it
+# declares the iOS 26 UIKit classes it hooks itself and links Preferences.framework,
+# and in the newer SDK the classes clash with UIKit's own declarations while
+# Preferences is gone. So it builds with its own SDK, the way its author does -
+# no patch to its sources, and nothing about the other tweaks changes.
+# Tools/install-own-sdk.sh fetches that SDK; the build workflow runs it.
+sparkle-ig_OWN_SDK = 16.2
