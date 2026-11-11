@@ -280,20 +280,24 @@ jobs:
           INPUT_TWEAKS: ${{ inputs.enabled_tweaks }}
         run: |
           set -euo pipefail
+          # The selection is a space-separated list, so it has to reach make as a
+          # single argument: an unquoted `ENABLED_TWEAKS=<list>` is word-split and
+          # make reads the tweak ids as extra targets ("No rule to make target
+          # 'FLEXing'"). An array keeps it one argument.
           tweaks="$(printf '%s' "$INPUT_TWEAKS" | tr -s ', ' ' ' | sed 's/^ *//;s/ *$//')"
+          make_args=(APP="${{ inputs.app_id }}" SDK_VERSION="${{ inputs.sdk_version }}")
           if [ "$tweaks" = "none" ]; then
-            enabled_arg="ENABLED_TWEAKS="
+            # An explicit empty selection: inject nothing at all.
+            make_args+=("ENABLED_TWEAKS=")
+            echo "ENABLED_MODE=none" >> "$GITHUB_ENV"
           elif [ -n "$tweaks" ]; then
-            enabled_arg="ENABLED_TWEAKS=$tweaks"
+            make_args+=("ENABLED_TWEAKS=$tweaks")
+            printf 'ENABLED_MODE=list\nENABLED_LIST=%s\n' "$tweaks" >> "$GITHUB_ENV"
           else
-            enabled_arg=""
+            # Nothing given: let the Makefile apply the app's default set.
+            echo "ENABLED_MODE=default" >> "$GITHUB_ENV"
           fi
-          echo "ENABLED_ARG=$enabled_arg" >> "$GITHUB_ENV"
-          dlibs="$(make -s --no-print-directory \
-            APP="${{ inputs.app_id }}" \
-            SDK_VERSION="${{ inputs.sdk_version }}" \
-            $enabled_arg \
-            print-inject-dylibs)"
+          dlibs="$(make -s --no-print-directory "${make_args[@]}" print-inject-dylibs)"
           echo "injected dylibs:"
           printf '  %s\n' $dlibs
           python3 Tools/check-inject-budget.py \
@@ -307,14 +311,23 @@ jobs:
           THEOS: ${{ github.workspace }}/theos
         run: |
           set -euo pipefail
-          make package THEOS_PACKAGE_SCHEME=rootless \
-            IPA="${{ steps.prepare.outputs.app_path }}" FINALPACKAGE=1 \
-            APP="${{ inputs.app_id }}" \
-            SDK_VERSION="${{ inputs.sdk_version }}" \
-            BUNDLE_ID="${{ steps.app.outputs.bundle_id }}" \
-            DISPLAY_NAME="${{ steps.app.outputs.app_name }}" \
-            IPA_PREFIX="${{ inputs.ipa_prefix || 'App' }}" \
-            $ENABLED_ARG
+          # Same array trick as above: the selection is one argument, never a
+          # word-split `ENABLED_TWEAKS=<list>`.
+          make_args=(
+            THEOS_PACKAGE_SCHEME=rootless
+            IPA="${{ steps.prepare.outputs.app_path }}"
+            FINALPACKAGE=1
+            APP="${{ inputs.app_id }}"
+            SDK_VERSION="${{ inputs.sdk_version }}"
+            BUNDLE_ID="${{ steps.app.outputs.bundle_id }}"
+            DISPLAY_NAME="${{ steps.app.outputs.app_name }}"
+            IPA_PREFIX="${{ inputs.ipa_prefix || 'App' }}"
+          )
+          case "${ENABLED_MODE:-default}" in
+            none) make_args+=("ENABLED_TWEAKS=") ;;
+            list) make_args+=("ENABLED_TWEAKS=$ENABLED_LIST") ;;
+          esac
+          make package "${make_args[@]}"
           echo "package=$(ls -t packages | head -n1)" >> $GITHUB_OUTPUT
 
       # The Safari extensions an app set injects are declared in its manifest, so
@@ -348,10 +361,14 @@ jobs:
         run: |
           set -euo pipefail
           ipa_in="packages/${{ steps.build_package.outputs.package }}"
+          # nullglob so an app set with no Safari extensions (Instagram) leaves the
+          # list empty instead of making the loop test a literal "*.appex".
+          shopt -s nullglob
           appex_args=()
           for d in "$RUNNER_TEMP/appex"/*.appex; do
-            [ -e "$d" ] && appex_args+=(-uwef "$d")
+            appex_args+=(-uwef "$d")
           done
+          shopt -u nullglob
           # Only the cloned Safari extensions are injected here: the theos-jailed
           # build already put every compiled tweak into the app, so handing it the
           # .deb as well would just copy those files a second time.
