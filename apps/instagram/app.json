@@ -4,5 +4,10 @@
   "bundleIds": [
     "com.burbn.instagram"
   ],
-  "process": "Instagram"
+  "process": "Instagram",
+  "version": "455.0.0",
+  "executable": "Instagram",
+  "inspectedAt": "2026-11-11T16:47:38Z",
+  "source": "sha256:ccf93d730937ac631b95fee7f16c4ae074e2251426d390dd4af33f426ba738a7",
+  "icon": "icon.png"
 }
