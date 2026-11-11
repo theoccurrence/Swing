@@ -1,4 +1,4 @@
-# AppBuilder
+# Swing
 
 Build pipeline that injects a **selectable set of tweaks** into a decrypted iOS
 app IPA and produces a SideStore/AltStore-compatible `.ipa`. It is app-agnostic:
@@ -37,7 +37,7 @@ tweak, `sparkle-ig`).
    app icon, and merges the name, bundle id, version and icon into
    `apps/<id>/app.json` / `apps/<id>/icon.png`. It commits only that metadata,
    drops the IPA again, and fails rather than commit anything IPA-shaped.
-2. **Build and Release AppBuilder** (`buildapp.yml`) downloads the decrypted IPA
+2. **Build and Release Swing** (`buildapp.yml`) downloads the decrypted IPA
    given as `decrypted_ipa_url`, but only after verifying that
    `apps/<app_id>/app.json` records the SHA-256 of that URL. The URL itself is
    masked and never stored — only its hash is — so a build is only possible for
@@ -75,7 +75,7 @@ icons and Safari extensions all come from `apps/<app_id>/`.
 ## Tweak selection
 
 `apps/<app>/registry.mk` is the single source of truth for that app's tweak
-registry. The GitHub workflow, the local web UI in `web/` and the AppBuilder iOS
+registry. The GitHub workflow, the local web UI in `web/` and the Swing iOS
 app all read it from there, so adding a tweak to an app means editing that
 registry only. The Makefile maps the app files onto its own vocabulary:
 
@@ -254,7 +254,7 @@ build — the next build is the gate.
 
 ## The iOS app
 
-`AppBuilder` (a separate Xcode project) is a thin client for the workflows: it
+`Swing` (a separate Xcode project) is a thin client for the workflows: it
 dispatches the build with the inputs above, shows status and logs, and downloads
 the resulting IPA into its library, from where it can be handed to SideStore. The
 add, remove and update workflows are app-scoped, so the client passes the app set

@@ -368,7 +368,7 @@ syncBtn.addEventListener('click', async () => {
 document.getElementById('download').addEventListener('click', () => {
   const blob = new Blob([currentScript], { type: 'text/x-shellscript' });
   const url = URL.createObjectURL(blob);
-  const link = h('a', { href: url, download: 'build-appbuilder.sh' });
+  const link = h('a', { href: url, download: 'build-swing.sh' });
   link.click();
   URL.revokeObjectURL(url);
 });

@@ -1,5 +1,5 @@
 #!/bin/bash
-# Downloads and unpacks one prebuilt tweak payload (.deb) for the AppBuilder
+# Downloads and unpacks one prebuilt tweak payload (.deb) for the Swing
 # build. Deliberately generic: the Makefile passes exactly what an app's
 # payloads.mk declares, so no payload is known here by name.
 #

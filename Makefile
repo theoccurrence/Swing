@@ -49,7 +49,7 @@ APP_PROCESS_NAME ?= $(APP_NAME)
 # injection, because theos-jailed injects everything listed in
 # $(TWEAK_NAME)_INJECT_DYLIBS into the app. Its own dylib is therefore never
 # injected - see the DYLIB export below.
-TWEAK_NAME ?= AppBuilder
+TWEAK_NAME ?= Swing
 DISPLAY_NAME ?= $(APP_NAME)
 BUNDLE_ID ?= $(APP_BUNDLE_ID)
 

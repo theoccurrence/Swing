@@ -1,5 +1,5 @@
 name: Bug Report
-description: Report a crash or misbehavior in an AppBuilder build
+description: Report a crash or misbehavior in a Swing build
 title: "[Bug] Replace this with your title"
 labels: bug
 body:

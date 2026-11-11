@@ -44,14 +44,14 @@ jobs:
           mkdir -p ipa
           FOUND=$(find artifact -type f -name '*.ipa' | head -n1)
           [ -n "$FOUND" ] || { echo "::error::No .ipa in that run's artifacts"; exit 1; }
-          cp "$FOUND" ipa/AppBuilder.ipa
+          cp "$FOUND" ipa/Swing.ipa
           ls -la ipa/
 
       - name: Extract IPA
         run: |
           set -euo pipefail
           mkdir -p work
-          unzip -q ipa/AppBuilder.ipa -d work
+          unzip -q ipa/Swing.ipa -d work
           APP_BIN=$(find work -type f -path '*Payload/*.app/*' -name '${{ inputs.app_binary_name }}' | head -n1)
           [ -n "$APP_BIN" ] || { echo "::error::App binary '${{ inputs.app_binary_name }}' not found in Payload"; exit 1; }
           echo "APP_BIN=$APP_BIN" >> $GITHUB_ENV

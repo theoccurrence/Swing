@@ -1,5 +1,5 @@
-Package: com.theoccurrence.appbuilder
-Name: AppBuilder
+Package: com.theoccurrence.swing
+Name: Swing
 Architecture: iphoneos-arm
 Description: Injects a selectable set of tweaks into a decrypted iOS app and repacks it as an IPA
 Maintainer: arichornlover

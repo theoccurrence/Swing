@@ -11,7 +11,7 @@
 # directory - and inspecting an IPA once, so apps/<app_id>/app.json records which
 # app it is (see inspect-ipa.yml).
 
-name: Build and Release AppBuilder
+name: Build and Release Swing
 
 on:
   workflow_dispatch:
@@ -75,7 +75,7 @@ concurrency:
 
 jobs:
   build:
-    name: Build AppBuilder
+    name: Build Swing
     # The iOS 27 SDK can only be consumed by the Xcode 27 toolchain: its .tbd
     # stubs list the arm64e.x1 target (unknown to Xcode 26's linker) and its
     # headers use attributes such as stack_protector_ignore (unknown to Xcode

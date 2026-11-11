@@ -1,9 +1,9 @@
 {
-  "name": "appbuilder-web-ui",
+  "name": "swing-web-ui",
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "description": "Local web front-end for the AppBuilder build workflow",
+  "description": "Local web front-end for the Swing build workflow",
   "scripts": {
     "start": "node server.js"
   },

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-AppBuilder static crash analyzer — no dependencies, runs anywhere Python 3 runs
+Swing static crash analyzer — no dependencies, runs anywhere Python 3 runs
 (GitHub macOS runners AND Windows locally).
 
 What it does with a built IPA (or its extracted binaries):

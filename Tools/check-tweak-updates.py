@@ -35,7 +35,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 
-USER_AGENT = "AppBuilder-check-tweak-updates"
+USER_AGENT = "Swing-check-tweak-updates"
 NETWORK_TIMEOUT = 8
 GIT_TIMEOUT = 25
 WORKERS = 8
