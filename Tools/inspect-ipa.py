@@ -190,9 +190,12 @@ def main():
         if icon:
             (app_dir / "icon.png").write_bytes(icon)
         manifest = app_dir / "app.json"
-        # Re-inspecting the same IPA must not turn into a commit: keeping the
-        # previous timestamp when nothing else changed makes the write a no-op,
-        # so the workflow takes its "no metadata change" path instead of pushing.
+        # Re-inspecting an IPA the repository has already recorded must not become a
+        # commit: keeping the previous timestamp when nothing else changed makes the
+        # write a no-op, so the workflow takes its "no metadata change" path instead
+        # of pushing. When the app was last verified is a question about *this*
+        # device anyway, and the app answers it itself (see BuildStore.verifiedAt),
+        # so nothing user-visible is lost here.
         previous = None
         if manifest.is_file():
             try:
