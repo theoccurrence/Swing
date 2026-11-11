@@ -18,8 +18,12 @@ app=${1:-youtube}
 
 theos=${THEOS:-$HOME/theos}
 files=("apps/$app/registry.mk" "apps/$app/custom.mk")
+# `|| true` is load-bearing: an app whose tweaks all share the pipeline's SDK has
+# no match at all, grep then exits 1 - and `set -euo pipefail` would kill the
+# script before it can say that there is nothing to do. (That is how this broke
+# every youtube build.)
 versions=$(grep -hoE '^[A-Za-z0-9._-]+_OWN_SDK[[:space:]]*[:?]?=[[:space:]]*[0-9][0-9.]*' "${files[@]}" 2>/dev/null \
-  | sed -E 's/.*=[[:space:]]*//' | sort -u)
+  | sed -E 's/.*=[[:space:]]*//' | sort -u || true)
 
 if [[ $list == 1 ]]; then
   printf '%s\n' $versions
