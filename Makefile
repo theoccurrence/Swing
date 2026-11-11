@@ -69,17 +69,26 @@ PACKAGE_VERSION = $(APP)-$(APP_VERSION)
 #   make package ENABLED_TWEAKS="YTPlus YouSlider"
 TWEAK_REGISTRY = $(APP_TWEAK_REGISTRY)
 PAYLOAD_TWEAKS = $(APP_PAYLOAD_TWEAKS)
+# SWITCH_TWEAKS are selectable like any other tweak but compile and inject
+# nothing themselves: they are switches the build acts on. YouTube's
+# OpenInYouTube, for example, is what makes the build inject the Open in YouTube
+# Safari extension - deselecting it leaves the extension out. Because they carry
+# no <id>_SUBPROJECT/<id>_DYLIB they must be kept out of the subproject and dylib
+# lists, and they have to be in the validation list so ENABLED_TWEAKS accepts
+# them.
+SWITCH_TWEAKS = $(APP_SWITCH_TWEAKS)
 DEFAULT_TWEAKS = $(APP_DEFAULT_TWEAKS)
 SUPPORT_SUBMODULES = $(APP_SUPPORT_SUBMODULES)
 ENABLED_TWEAKS ?= $(DEFAULT_TWEAKS)
 
-UNKNOWN_TWEAKS = $(filter-out $(TWEAK_REGISTRY) $(PAYLOAD_TWEAKS),$(ENABLED_TWEAKS))
+COMPILED_TWEAKS = $(filter-out $(PAYLOAD_TWEAKS) $(SWITCH_TWEAKS),$(ENABLED_TWEAKS))
+UNKNOWN_TWEAKS = $(filter-out $(TWEAK_REGISTRY) $(PAYLOAD_TWEAKS) $(SWITCH_TWEAKS),$(ENABLED_TWEAKS))
 ifneq ($(UNKNOWN_TWEAKS),)
-$(error Unknown tweak(s) in ENABLED_TWEAKS: $(UNKNOWN_TWEAKS). Valid ids: $(TWEAK_REGISTRY) $(PAYLOAD_TWEAKS))
+$(error Unknown tweak(s) in ENABLED_TWEAKS: $(UNKNOWN_TWEAKS). Valid ids: $(TWEAK_REGISTRY) $(PAYLOAD_TWEAKS) $(SWITCH_TWEAKS))
 endif
 
-ENABLED_TWEAK_SUBPROJECTS = $(foreach t,$(filter-out $(PAYLOAD_TWEAKS),$(ENABLED_TWEAKS)),$($(t)_SUBPROJECT))
-ENABLED_TWEAK_DYLIBS = $(foreach t,$(filter-out $(PAYLOAD_TWEAKS),$(ENABLED_TWEAKS)),$(THEOS_OBJ_DIR)/$($(t)_DYLIB).dylib)
+ENABLED_TWEAK_SUBPROJECTS = $(foreach t,$(COMPILED_TWEAKS),$($(t)_SUBPROJECT))
+ENABLED_TWEAK_DYLIBS = $(foreach t,$(COMPILED_TWEAKS),$(THEOS_OBJ_DIR)/$($(t)_DYLIB).dylib)
 
 export ADDITIONAL_CFLAGS = $(APP_ADDITIONAL_CFLAGS)
 
@@ -113,7 +122,15 @@ $(TWEAK_NAME)_INJECT_DYLIBS = $(ENABLED_TWEAK_DYLIBS) $(PAYLOAD_DYLIBS)
 $(TWEAK_NAME)_EMBED_LIBRARIES = $(APP_EMBED_LIBRARIES)
 $(TWEAK_NAME)_EMBED_FRAMEWORKS = $(APP_EMBED_FRAMEWORKS)
 $(TWEAK_NAME)_EMBED_BUNDLES = $(wildcard Bundles/*.bundle) $(APP_EMBED_BUNDLES) $(PAYLOAD_BUNDLES)
-$(TWEAK_NAME)_EMBED_EXTENSIONS = $(APP_EMBED_EXTENSIONS)
+# An app can gate its build extras on a switch tweak: when it names one in
+# APP_EMBED_EXTENSIONS_SWITCH the extensions are only embedded while that id is
+# enabled. An app without such a switch keeps them unconditional.
+ifeq ($(APP_EMBED_EXTENSIONS_SWITCH),)
+APP_EXTENSIONS_SELECTED = 1
+else
+APP_EXTENSIONS_SELECTED = $(filter $(APP_EMBED_EXTENSIONS_SWITCH),$(ENABLED_TWEAKS))
+endif
+$(TWEAK_NAME)_EMBED_EXTENSIONS = $(if $(APP_EXTENSIONS_SELECTED),$(APP_EMBED_EXTENSIONS),)
 
 INSTALL_TARGET_PROCESSES = $(APP_PROCESS_NAME)
 REMOVE_EXTENSIONS = 1
@@ -145,6 +162,13 @@ include $(THEOS_MAKE_PATH)/tweak.mk
 .PHONY: internal-clean before-all
 internal-clean::
 	@rm -rf $(PAYLOAD_DIR)
+
+# Prints the resolved tweak selection, one per line: the input after the app's
+# defaults were applied. The build workflow reads it to know which switch tweaks
+# are on without repeating the Makefile's default logic.
+.PHONY: print-enabled-tweaks
+print-enabled-tweaks:
+	@printf '%s\n' $(ENABLED_TWEAKS)
 
 # Prints the dylibs theos-jailed injects, one per line - the authoritative list
 # of what has to fit into the binary's load-command area. Tools/check-inject-budget.py

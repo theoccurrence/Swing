@@ -10,6 +10,7 @@ Three kinds of tweaks are distinguished:
 
   submodule  a git submodule pinned to a commit - the update is a new gitlink
   payload    a prebuilt .deb downloaded by the build (YTPlus, Gonerino)
+  switch     a selectable id the build acts on and nothing is compiled for it
   vendored   code that lives in this repository and has no upstream
 
 Upstream versions are read from raw.githubusercontent.com and git ls-remote, so
@@ -228,7 +229,7 @@ def variable_name(makefile, name):
     return name
 
 
-def local_entry(repo, tweak_id, makefile, modules, payloads):
+def local_entry(repo, tweak_id, makefile, modules, payloads, switches=()):
     subproject = lookup(makefile, f"{tweak_id}_SUBPROJECT")
     path = next((p for p in modules if subproject and (subproject == p or subproject.startswith(p + "/"))),
                 subproject or f"Tweaks/{tweak_id}")
@@ -247,7 +248,12 @@ def local_entry(repo, tweak_id, makefile, modules, payloads):
         "outdated": None,
         "note": None,
     }
-    if tweak_id in payloads:
+    if tweak_id in switches:
+        # A switch compiles and injects nothing itself - the build acts on it.
+        entry["kind"] = "switch"
+        entry["outdated"] = False
+        entry["note"] = "build switch - nothing to compare"
+    elif tweak_id in payloads:
         entry["kind"] = "payload"
         entry["url"] = lookup(makefile, f"{tweak_id}_URL")
         entry["local_version"] = lookup(makefile, f"{tweak_id}_VERSION")
@@ -289,6 +295,8 @@ def support_entry(repo, path, modules):
 def fill_upstream(entry, token, state):
     """Add the upstream version/commit. Runs in a worker, must not raise."""
     try:
+        if entry["kind"] == "switch":
+            return
         if entry["kind"] in ("submodule", "support"):
             url, branch = entry["url"], entry["ref"]
             if not url:
@@ -349,6 +357,7 @@ def collect(repo, only=None, token=None, apps_filter=None):
         manifest = app_manifest(repo, app)
         registry = (makefile.get("APP_TWEAK_REGISTRY") or "").split()
         payloads = set((makefile.get("APP_PAYLOAD_TWEAKS") or "").split())
+        switches = set((makefile.get("APP_SWITCH_TWEAKS") or "").split())
         summaries.append({
             "id": app,
             "name": manifest.get("name") or app,
@@ -356,10 +365,10 @@ def collect(repo, only=None, token=None, apps_filter=None):
             "defaults": (makefile.get("APP_DEFAULT_TWEAKS") or "").split(),
             "custom": (makefile.get("CUSTOM_TWEAKS") or "").split(),
         })
-        for tweak_id in registry + sorted(payloads):
+        for tweak_id in registry + sorted(payloads) + sorted(switches):
             if only and tweak_id not in only:
                 continue
-            entry = tweaks.get(tweak_id) or local_entry(repo, tweak_id, makefile, modules, payloads)
+            entry = tweaks.get(tweak_id) or local_entry(repo, tweak_id, makefile, modules, payloads, switches)
             entry.setdefault("apps", [])
             if app not in entry["apps"]:
                 entry["apps"].append(app)

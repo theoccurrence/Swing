@@ -12,7 +12,8 @@
         "repo": "BillyCurtis/OpenYouTubeSafariExtension",
         "appex": "OpenYouTubeSafariExtension.appex"
       }
-    ]
+    ],
+    "safariExtensionSwitch": "OpenInYouTube"
   },
   "version": "21.44.4",
   "executable": "YouTube",

@@ -298,6 +298,10 @@ jobs:
             echo "ENABLED_MODE=default" >> "$GITHUB_ENV"
           fi
           dlibs="$(make -s --no-print-directory "${make_args[@]}" print-inject-dylibs)"
+          # The selection as the Makefile resolved it (input + app defaults), so
+          # the steps below can act on switch tweaks without repeating that logic.
+          selected="$(make -s --no-print-directory "${make_args[@]}" print-enabled-tweaks)"
+          printf 'SELECTED_TWEAKS=%s\n' "$selected" >> "$GITHUB_ENV"
           echo "injected dylibs:"
           printf '  %s\n' $dlibs
           python3 Tools/check-inject-budget.py \
@@ -338,6 +342,16 @@ jobs:
           APP_ID: ${{ inputs.app_id }}
         run: |
           set -euo pipefail
+          # An app can tie its Safari extensions to a switch tweak (YouTube does:
+          # OpenInYouTube). When it names one, the extensions are only injected
+          # while that tweak is selected - the selection is the one the Makefile
+          # resolved, so the app's defaults count and another app can never pick
+          # them up by accident.
+          switch="$(python3 Tools/app-info.py --app "$APP_ID" --field build.safariExtensionSwitch --default "")"
+          if [ -n "$switch" ] && ! printf ' %s ' "${SELECTED_TWEAKS:-}" | grep -q " ${switch} "; then
+            echo "Safari extensions stay out: '$switch' is not selected." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
           mkdir -p "$RUNNER_TEMP/appex"
           python3 - <<'PY' > "$RUNNER_TEMP/extensions.tsv"
           import json, os

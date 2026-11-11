@@ -18,7 +18,7 @@ specific to that app, so the app sets never bleed into each other:
 | Path | Role |
 |---|---|
 | `apps/<app>/app.json` | Manifest. Records what the app actually is — `id`, `name`, `bundleIds`, `version`, `executable`, `icon`, the `source` `sha256:<hex>` of the inspected IPA URL and `inspectedAt`. Written by the Inspect IPA workflow; the hand-owned `process` and `build` keys (`build.alternateIcons`, `build.safariExtensions`) say how to build it. |
-| `apps/<app>/registry.mk` | The tweak registry: `APP_NAME`, `APP_BUNDLE_ID`, `APP_PROCESS_NAME`, `APP_DEFAULT_TWEAKS`, `APP_TWEAK_REGISTRY`, one `<id>_SUBPROJECT` + `<id>_DYLIB` per tweak, `APP_SUPPORT_SUBMODULES`, `APP_ADDITIONAL_CFLAGS`, `APP_EXTRA_SUBPROJECTS`, `APP_EMBED_LIBRARIES`, `APP_EMBED_FRAMEWORKS`, `APP_EMBED_EXTENSIONS`. |
+| `apps/<app>/registry.mk` | The tweak registry: `APP_NAME`, `APP_BUNDLE_ID`, `APP_PROCESS_NAME`, `APP_DEFAULT_TWEAKS`, `APP_TWEAK_REGISTRY`, `APP_SWITCH_TWEAKS`, one `<id>_SUBPROJECT` + `<id>_DYLIB` per compiled tweak, `APP_SUPPORT_SUBMODULES`, `APP_ADDITIONAL_CFLAGS`, `APP_EXTRA_SUBPROJECTS`, `APP_EMBED_LIBRARIES`, `APP_EMBED_FRAMEWORKS`, `APP_EMBED_EXTENSIONS`, `APP_EMBED_EXTENSIONS_SWITCH`. |
 | `apps/<app>/payloads.mk` | Optional. `APP_PAYLOAD_TWEAKS` plus a mixed-case block per prebuilt payload: `<id>_VERSION`, `<id>_URL`, `<id>_DYLIB_REL`, `<id>_BUNDLE_REL`, `<id>_BUNDLE_NAME` (e.g. `YTPlus_VERSION`, `Gonerino_URL`). |
 | `apps/<app>/custom.mk` | Optional. Appended by the Add tweak workflow: `APP_TWEAK_REGISTRY += <id>`, `CUSTOM_TWEAKS += <id>`, `<id>_SUBPROJECT`, `<id>_DYLIB`. |
 | `apps/<app>/tweaks.json` | Picker grouping: `{"groups":[{"name":"Essentials","tweaks":["..."]}, ...]}`. Tweaks listed nowhere land in an **Other** group; ids in `CUSTOM_TWEAKS` go into a **Custom** group that only appears once one exists. |
@@ -83,8 +83,17 @@ registry only. The Makefile maps the app files onto its own vocabulary:
 |---|---|
 | `APP_TWEAK_REGISTRY` | Tweaks compiled from a submodule (`<id>_SUBPROJECT`, `<id>_DYLIB`). |
 | `APP_PAYLOAD_TWEAKS` | Tweaks shipped as prebuilt `.deb` packages that the build downloads and unpacks. |
+| `APP_SWITCH_TWEAKS` | Selectable ids that compile and inject nothing: they are switches the build acts on. |
 | `APP_DEFAULT_TWEAKS` | Pre-selected set; also the default of the workflow's `enabled_tweaks` input. |
 | `ENABLED_TWEAKS` | Space- or comma-separated ids to inject. Overrides `APP_DEFAULT_TWEAKS`. |
+
+A switch tweak is a normal row in the picker that the build reads instead of
+compiling it. YouTube's `OpenInYouTube` is the only one: it gates the Open in
+YouTube Safari extension, both the `.appex` bundles the Makefile embeds
+(`APP_EMBED_EXTENSIONS_SWITCH`) and the ones `buildapp.yml` clones and hands to
+`cyan` (`build.safariExtensionSwitch` in `app.json`). It is on by default for
+YouTube; deselecting it leaves the extensions out, and another app can never pick
+them up because the switch is not one of its tweaks.
 
 Payload tweaks are listed first, because they carry most of the functionality:
 

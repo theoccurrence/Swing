@@ -148,18 +148,26 @@ async function buildApp(id) {
 
   const registryIds = mkList(readVar('APP_TWEAK_REGISTRY'));
   const payloadIds = mkList(readVar('APP_PAYLOAD_TWEAKS'));
+  const switchIds = mkList(readVar('APP_SWITCH_TWEAKS'));
   const customIds = new Set(mkList(readVar('CUSTOM_TWEAKS')));
   const defaults = new Set(mkList(readVar('APP_DEFAULT_TWEAKS')));
-  const ids = [...registryIds, ...payloadIds.filter((pid) => !registryIds.includes(pid))];
+  const ids = [
+    ...registryIds,
+    ...payloadIds.filter((pid) => !registryIds.includes(pid)),
+    ...switchIds.filter((sid) => !registryIds.includes(sid) && !payloadIds.includes(sid)),
+  ];
 
   const tweaks = await Promise.all(ids.map(async (tweakId) => {
     const payload = payloadIds.includes(tweakId);
+    // A switch compiles nothing; it only tells the build to do something.
+    const isSwitch = switchIds.includes(tweakId);
     // Payload tweaks ship as prebuilt .debs, so their version lives in payloads.mk
     // under the mixed-case <id>_VERSION; submodules keep it in their control file.
-    const control = payload ? {} : await readControl(tweakId);
+    const control = payload || isSwitch ? {} : await readControl(tweakId);
     return {
       id: tweakId,
       payload,
+      switch: isSwitch,
       default: defaults.has(tweakId),
       version: (payload ? readVar(`${tweakId}_VERSION`) : control.version) || null,
       dylib: readVar(`${tweakId}_DYLIB`) || null,

@@ -11,7 +11,7 @@ APP_PROCESS_NAME = YouTube
 # Pre-selected set; also the default of the build workflow's enabled_tweaks input.
 APP_DEFAULT_TWEAKS = YTPlus YTweaks YTABConfig YTClassicVideoQuality \
 	Return-YouTube-Dislikes YTVideoOverlay YouQuality YouSlider YouTubeLegacy \
-	YouGroupSettings FLEXing
+	YouGroupSettings FLEXing OpenInYouTube
 
 # Tweaks compiled from a submodule (<id>_SUBPROJECT, <id>_DYLIB).
 APP_TWEAK_REGISTRY = DontEatMyContent FLEXing Return-YouTube-Dislikes YTABConfig \
@@ -85,6 +85,13 @@ APP_ADDITIONAL_CFLAGS = -I$(THEOS_PROJECT_DIR)/Tweaks/RemoteLog -I$(THEOS_PROJEC
 APP_EXTRA_SUBPROJECTS = Tweaks/Alderis
 APP_EMBED_LIBRARIES = $(THEOS_OBJ_DIR)/libcolorpicker.dylib
 APP_EMBED_FRAMEWORKS = $(_THEOS_LOCAL_DATA_DIR)/$(THEOS_OBJ_DIR_NAME)/install_Alderis.xcarchive/Products/var/jb/Library/Frameworks/Alderis.framework
+
+# OpenInYouTube is a switch, not a compiled tweak: it decides whether the Open in
+# YouTube Safari extension (and the share extension that ships with it) ends up in
+# the app. Both this Makefile and buildapp.yml gate on it, so deselecting it in
+# the picker really leaves the extensions out. It is on by default.
+APP_SWITCH_TWEAKS = OpenInYouTube
+APP_EMBED_EXTENSIONS_SWITCH = OpenInYouTube
 APP_EMBED_EXTENSIONS = $(wildcard Extensions/*.appex)
 
 export libcolorpicker_ARCHS = arm64
