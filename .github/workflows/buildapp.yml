@@ -300,7 +300,9 @@ jobs:
           dlibs="$(make -s --no-print-directory "${make_args[@]}" print-inject-dylibs)"
           # The selection as the Makefile resolved it (input + app defaults), so
           # the steps below can act on switch tweaks without repeating that logic.
-          selected="$(make -s --no-print-directory "${make_args[@]}" print-enabled-tweaks)"
+          # The target prints one tweak per line and $GITHUB_ENV takes exactly one
+          # KEY=value per line, so flatten it before writing.
+          selected="$(make -s --no-print-directory "${make_args[@]}" print-enabled-tweaks | tr '\n' ' ')"
           printf 'SELECTED_TWEAKS=%s\n' "$selected" >> "$GITHUB_ENV"
           echo "injected dylibs:"
           printf '  %s\n' $dlibs
