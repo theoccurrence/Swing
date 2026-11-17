@@ -15,9 +15,9 @@
     ],
     "safariExtensionSwitch": "OpenInYouTube"
   },
-  "version": "21.45.4",
+  "version": "21.46.3",
   "executable": "YouTube",
-  "inspectedAt": "2026-11-13T23:52:39Z",
-  "source": "sha256:4aded5fe529f614d9696b2e3f0f3046a67c6367ce47d8aa4d77961110e91382c",
+  "inspectedAt": "2026-11-17T11:15:05Z",
+  "source": "sha256:105f146d5cb1ca5b6ff14526fa3bd094c4e0e8378fd5abb0f6bf2c463cfc6f4b",
   "icon": "icon.png"
 }
